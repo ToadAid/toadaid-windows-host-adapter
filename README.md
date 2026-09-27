@@ -55,3 +55,11 @@ The worker writes screenshots and JSON evidence under the configured artifact ro
 ## Development
 
 The local cut uses the exact adjacent `~/toadaid-agent-capabilities` checkout for proof while `package.json` pins the same canonical GitHub commit.
+
+## WA-P1A.1 provider membrane
+
+The next Linux-verifiable layer introduces a bounded provider/worker protocol, generation-bound opaque Windows evidence references, provider-owned artifact lifecycle rules, and a mutation-free C# native-worker skeleton.
+
+This does not replace WA-P1B. Native Windows UI Automation, DPI, session, RDP, UIPI, screenshot, and object-lifetime behavior remain unproven until a real Windows host is available.
+
+The provider membrane answers whether the exact Windows object previously observed still exists in the same generation and OS identity boundary. The shared capability spine remains the only authority deciding whether an action may occur.

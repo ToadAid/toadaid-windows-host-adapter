@@ -178,6 +178,29 @@ function Rect-OverlapsAny(
   return $false
 }
 
+function Rect-IsValid(
+  [System.Windows.Rect]$Rect
+) {
+  foreach ($value in @(
+    [double]$Rect.Left,
+    [double]$Rect.Top,
+    [double]$Rect.Width,
+    [double]$Rect.Height
+  )) {
+    if (
+      [double]::IsNaN($value) -or
+      [double]::IsInfinity($value) -or
+      [Math]::Abs($value) -gt 10000000
+    ) {
+      return $false
+    }
+  }
+  return (
+    $Rect.Width -gt 0 -and
+    $Rect.Height -gt 0
+  )
+}
+
 function Rect-ContainedByAny(
   [System.Windows.Rect]$Rect,
   [object[]]$Scopes
@@ -355,9 +378,10 @@ function Ui-Snapshot(
     if ($null -eq $root) {
       throw "window handle is unavailable"
     }
-    $first = $walker.GetFirstChild($root)
-    if ($null -ne $first) {
-      $queue.Enqueue($first)
+    $child = $walker.GetFirstChild($root)
+    while ($null -ne $child) {
+      $queue.Enqueue($child)
+      $child = $walker.GetNextSibling($child)
     }
   } else {
     $root = [System.Windows.Automation.AutomationElement]::RootElement
@@ -370,7 +394,12 @@ function Ui-Snapshot(
     while ($null -ne $top) {
       try {
         $topRect = $top.Current.BoundingRectangle
-        if (Rect-OverlapsAny $topRect $authorizedRects) {
+        $topOffscreen = [bool]$top.Current.IsOffscreen
+        if (
+          (Rect-IsValid $topRect) -and
+          (-not $topOffscreen) -and
+          (Rect-OverlapsAny $topRect $authorizedRects)
+        ) {
           $queue.Enqueue($top)
         }
       } catch {}
@@ -389,8 +418,16 @@ function Ui-Snapshot(
 
     try {
       $rect = $element.Current.BoundingRectangle
-      if ($null -ne $authorizedRects) {
-        $recordElement = Rect-ContainedByAny $rect $authorizedRects
+      $offscreen = [bool]$element.Current.IsOffscreen
+      $recordElement =
+        (Rect-IsValid $rect) -and
+        (-not $offscreen)
+      if (
+        $recordElement -and
+        $null -ne $authorizedRects
+      ) {
+        $recordElement =
+          Rect-ContainedByAny $rect $authorizedRects
       }
     } catch {
       $recordElement = $false
@@ -448,14 +485,9 @@ function Ui-Snapshot(
 
     try {
       $child = $walker.GetFirstChild($element)
-      if ($null -ne $child) {
+      while ($null -ne $child) {
         $queue.Enqueue($child)
-      }
-      if ($null -ne $Parameters.windowId) {
-        $sibling = $walker.GetNextSibling($element)
-        if ($null -ne $sibling) {
-          $queue.Enqueue($sibling)
-        }
+        $child = $walker.GetNextSibling($child)
       }
     } catch {}
   }

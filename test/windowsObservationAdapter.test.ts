@@ -463,4 +463,20 @@ test("WA-P1 source worker remains observation-only", async () => {
     source.includes("Element-IsWithinWindow"),
     true,
   );
+  assert.equal(
+    source.includes("Rect-IsValid"),
+    true,
+  );
+  assert.equal(
+    source.includes(
+      "$child = $walker.GetNextSibling($child)",
+    ),
+    true,
+  );
+  assert.equal(
+    source.includes(
+      "$sibling = $walker.GetNextSibling($element)",
+    ),
+    false,
+  );
 });
