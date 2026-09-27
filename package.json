@@ -1,0 +1,30 @@
+{
+  "name": "@toadaid/windows-host-adapter",
+  "version": "0.1.0-alpha.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "files": [
+    "dist/src",
+    "worker",
+    "README.md",
+    "BUILD_LIST.md"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test:build": "tsc -p tsconfig.json",
+    "test": "npm run test:build && node --test dist/test/*.test.js",
+    "live:observation": "node scripts/windows-live-observation-smoke.mjs"
+  },
+  "dependencies": {
+    "@toadaid/agent-capabilities": "github:ToadAid/toadaid-agent-capabilities#bd55a3d8fd45aeabe717e794263e04b4032fa242"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.4",
+    "typescript": "7.0.2"
+  }
+}
