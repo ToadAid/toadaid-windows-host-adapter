@@ -15,9 +15,10 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
-    "test:build": "tsc -p tsconfig.json",
-    "test": "npm run test:build && node --test dist/test/*.test.js",
+    "clean": "node scripts/dist-hygiene.mjs clean",
+    "build": "node scripts/dist-hygiene.mjs clean --prepare && tsc -p tsconfig.build.json && node scripts/dist-hygiene.mjs mark --config tsconfig.build.json",
+    "test:build": "node scripts/dist-hygiene.mjs clean --prepare && tsc -p tsconfig.json && node scripts/dist-hygiene.mjs mark --config tsconfig.json",
+    "test": "npm run test:build && node scripts/dist-hygiene.mjs run-tests",
     "live:observation": "node scripts/windows-live-observation-smoke.mjs"
   },
   "dependencies": {
