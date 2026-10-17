@@ -5,9 +5,9 @@ name: ci
 # - On Windows only the NON-interactive ("pure") native tests can run; live UI
 #   observation tests are opt-in (TOADAID_NATIVE_OBSERVATION_TESTS=1) and are
 #   never enabled here. No secrets, no elevation, no browsers, no live agents.
-# - Dependencies: the repository has no committed lockfile, so `npm ci` cannot
-#   run; `npm install` resolves the exact pins in package.json (see docs/CI.md
-#   for the residual non-reproducibility).
+# - Dependencies: installed with `npm ci --include=dev` from the committed,
+#   reviewed package-lock.json (see docs/CI.md and docs/DEPENDENCY_LOCK.md;
+#   the git-sourced capability package is pinned by commit, not by integrity).
 
 on:
   pull_request:
@@ -56,11 +56,15 @@ jobs:
           echo "NODE_ENV=${NODE_ENV:-<unset>}"
           echo "TOADAID_NATIVE_OBSERVATION_TESTS=${TOADAID_NATIVE_OBSERVATION_TESTS:-<unset>}"
 
-      - name: Install dependencies (no lockfile; dev dependencies explicit)
+      - name: Install dependencies from the committed lockfile (dev dependencies explicit)
         shell: bash
-        run: npm install --include=dev --no-package-lock
+        run: npm ci --include=dev
 
-      - name: Installed dependency tree (for review; not reproducible without a lockfile)
+      - name: Lockfile unchanged by install
+        shell: bash
+        run: git diff --exit-code -- package-lock.json
+
+      - name: Installed dependency tree (for review)
         shell: bash
         run: npm ls --all || true
 
