@@ -5,6 +5,7 @@ import {
 import {
   mkdtemp,
   readFile,
+  realpath,
   writeFile,
 } from "node:fs/promises";
 import {
@@ -230,11 +231,14 @@ test("WA-P1 adapter verifies artifacts and exposes only verified local resolutio
     result.artifacts.length,
     1,
   );
+  // The adapter resolves artifacts to their canonical real path; tmpdir() may
+  // be a different spelling of the same directory (e.g. a Windows 8.3 short
+  // name such as RUNNER~1 on GitHub-hosted runners). Compare canonical forms.
   assert.equal(
     adapter.resolveArtifactPath(
       result.artifacts[0]!.id,
     ),
-    artifactPath,
+    await realpath(artifactPath),
   );
 
   const onDisk = await readFile(

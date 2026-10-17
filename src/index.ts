@@ -1,7 +1,10 @@
 export {
   buildWindowsPowerShellInvocation,
   createWindowsDesktopObservationAdapter,
+  ADAPTER_WATCHDOG_GRACE_MS,
+  createPowerShellWindowsObservationWorker,
   defaultWindowsPowerShellPath,
+  workerDeadlineReserveMs,
 } from "./windowsObservationAdapter.js";
 
 export type {
