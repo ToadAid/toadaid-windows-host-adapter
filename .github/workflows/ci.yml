@@ -78,3 +78,83 @@ jobs:
           TOADAID_NATIVE_OBSERVATION_TESTS: ""
           TOADAID_NATIVE_CSHARP_WORKER: ""
         run: npm test
+
+  native-dotnet10:
+    # Automated .NET 10 build + strict Node/C# interop for the native skeleton
+    # (WA-NATIVE-NET10-P1, PR #12). Windows only: the skeleton is a Windows
+    # worker. One-shot protocol frames only; no observation, no mutation, no
+    # live desktop, no secrets. Any skipped interop test fails the job.
+    name: native C# skeleton (.NET 10, windows-2022)
+    runs-on: windows-2022
+    timeout-minutes: 20
+    env:
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+      npm_config_audit: "false"
+      npm_config_fund: "false"
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+      DOTNET_NOLOGO: "1"
+      DOTNET_SKIP_FIRST_TIME_EXPERIENCE: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+
+      - name: Set up .NET 10 SDK (pinned version)
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: "10.0.402"
+
+      - name: Toolchain (must be a .NET 10 SDK)
+        shell: pwsh
+        run: |
+          $v = (dotnet --version).Trim()
+          "dotnet SDK in use: $v"
+          dotnet --list-sdks
+          dotnet --list-runtimes
+          if (-not $v.StartsWith("10.")) { throw "expected a .NET 10 SDK, got $v" }
+
+      - name: Install dependencies from the committed lockfile (dev dependencies explicit)
+        shell: bash
+        run: npm ci --include=dev
+
+      - name: Lockfile unchanged by install
+        shell: bash
+        run: git diff --exit-code -- package-lock.json
+
+      - name: Build TypeScript sources and tests
+        shell: bash
+        run: npm run test:build
+
+      - name: Build native skeleton (.NET 10, warnings as errors)
+        shell: pwsh
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP "toadaid-skeleton"
+          dotnet build native/ToadAid.WindowsWorker/ToadAid.WindowsWorker.csproj -c Release -o $out
+          if ($LASTEXITCODE -ne 0) { throw "dotnet build failed" }
+          $rc = Get-Content (Join-Path $out "ToadAid.WindowsWorker.runtimeconfig.json") -Raw | ConvertFrom-Json
+          "runtimeconfig tfm: $($rc.runtimeOptions.tfm)"
+          if ($rc.runtimeOptions.tfm -ne "net10.0") { throw "skeleton is not built for net10.0" }
+          foreach ($f in "ToadAid.WindowsWorker.dll", "ToadAid.WindowsWorker.exe") {
+            "$f sha256=$((Get-FileHash (Join-Path $out $f) -Algorithm SHA256).Hash.ToLowerInvariant())"
+          }
+
+      - name: Strict Node/C# interop against the .NET 10 skeleton (no skips allowed)
+        shell: pwsh
+        env:
+          TOADAID_NATIVE_OBSERVATION_TESTS: ""
+        run: |
+          $env:TOADAID_NATIVE_CSHARP_WORKER = Join-Path $env:RUNNER_TEMP "toadaid-skeleton\ToadAid.WindowsWorker.exe"
+          $tap = node --test --test-reporter=tap dist/test/nativeWorkerSkeletonInterop.test.js dist/test/nativeWorkerSkeletonSource.test.js
+          $code = $LASTEXITCODE
+          $tap
+          if ($code -ne 0) { throw "interop tests failed (exit $code)" }
+          $count = { param($k) [int](($tap | Select-String "^# $k (\d+)$").Matches[0].Groups[1].Value) }
+          if ((& $count "tests") -ne 4 -or (& $count "pass") -ne 4 -or (& $count "fail") -ne 0 -or (& $count "skipped") -ne 0) {
+            throw "expected exactly 4 tests, 4 passing, 0 failing, 0 skipped"
+          }

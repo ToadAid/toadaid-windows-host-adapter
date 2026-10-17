@@ -1,8 +1,8 @@
-# Native worker: .NET 10 LTS migration plan (proposal, not executed)
+# Native worker: .NET 10 LTS migration plan
 
-Status: **plan only.** Nothing here is installed or retargeted. Retargeting and
-installing .NET 10 is a separately reviewed development cut, run with operator
-consent; the existing per-user .NET 8 SDK is not replaced.
+Status: **executed offline in WA-NATIVE-NET10-P1 (issue #8), draft only.** The
+skeleton now targets `net10.0`; the per-user .NET 8 SDK stays installed for
+rollback. No runtime, service or deployment uses the native worker.
 
 ## Why now
 
@@ -42,3 +42,24 @@ support on **10 November 2026**; after that it receives no security fixes.
 
 Runtime deployment, self-contained publishing, signing, installers, services,
 or enabling the native worker as the observation path (WA-P1D).
+
+## Execution record (2026-10-17, WA-NATIVE-NET10-P1)
+
+- Operator consent: Numair, on his development host.
+- Installer: Microsoft `dotnet-install.ps1` (Authenticode Valid, CN=Microsoft
+  Corporation; SHA-256 `e8b873e1…13d6`), `-Channel 10.0 -NoPath`.
+- Package: `https://builds.dotnet.microsoft.com/dotnet/Sdk/10.0.402/dotnet-sdk-10.0.402-win-x64.zip`
+  (300,755,826 bytes).
+- Installed: .NET SDK **10.0.402** (commit a8dd0577c5, MSBuild 18.9.15) in
+  `E:\ToadAid\tools\dotnet-sdk-10`, per-user, no PATH change; `dotnet.exe`
+  Authenticode Valid (CN=.NET, O=Microsoft Corporation). The .NET 8 SDK in
+  `E:\ToadAid\tools\dotnet-sdk-8` is unchanged.
+- Project change: `TargetFramework` `net8.0` → `net10.0` only.
+- The `System.Text.Json` behaviours the strict parser depends on are pinned by
+  the interop vectors (duplicate keys incl. escaped/nested, depth, invalid
+  UTF-8, BOM, framing), which must pass identically on the .NET 10 build.
+- CI: after #4 landed, this cut adds the `native C# skeleton (.NET 10,
+  windows-2022)` job to `.github/workflows/ci.yml`: .NET SDK 10.0.402 via
+  pinned `actions/setup-dotnet` v6.0.0, a .NET 10 build with warnings as
+  errors, a `net10.0` runtimeconfig check, and the strict interop + source
+  tests against the built executable, failing on any skip. See `docs/CI.md`.
