@@ -117,3 +117,57 @@ Statuses:
 **WA-P1C should begin only after F1–F4 are fixed and WA-P1B is re-run green on this host.** F1 is the priority, because it is a confidentiality defect in observation.
 
 The environment matrix belongs to WA-P1C: multi-monitor, negative virtual coordinates, mixed DPI, RDP/locked/disconnected sessions, secure desktop, WOW64 targets and accessibility-poor applications.
+
+---
+
+# Re-run 2026-10-17 — after WA-P1A.2 repairs and review hardening
+
+> Everything above this line is the **first proof (2026-10-16) and is kept unchanged**; its report `docs/proofs/wa-p1b-native-proof-2026-10-16.json` is not modified. This section adds a separate, dated proof.
+
+## Exact inputs (local combined branch, not pushed)
+
+The harness ran on a local branch `wa-p1b-combined-20261017` = `main` `2743255` + normal merges of:
+
+| PR | Branch | Head |
+|---|---|---|
+| #1 WA-P1A.1 strict frames | `wa-p1a1-strict-provider-frames` | `36a639a758704604acd4dff34208752fce0a096e` |
+| #3 WA-P1A.2 repairs + review hardening | `wa-p1a2-native-observation-safety` | `31a6a92f6f5c2cda52f3b9c29ccfb51e5c0b7b84` |
+| #2 this harness incl. follow-up | `wa-p1b-native-observation-proof` | `c844f45564d811726c685ec0d05507804743594b` |
+| #5 C# skeleton strict protocol | `wa-native-skeleton-strict-protocol` | `f0a01fe182e56fd67a29262d4fdbde452073091b` |
+
+- Combined commit `01ef591f…` (tree `e84239f0…`); capability pin unchanged (`bd55a3d…`).
+- Worker SHA-256 (on-disk, CRLF): `8ff623b3…d10f`.
+- `TOADAID_NATIVE_CSHARP_WORKER` pointed at the #5 skeleton built with .NET SDK 8.0.426 (`ToadAid.WindowsWorker.dll` SHA-256 `14d43bde…fc73`).
+- On this combined branch: 40 tests, 35 pass, 5 live skipped. The live safety suite was run separately on #3: 29/29.
+- Host, session and DPI are as in the first run: Windows 10 22H2, console session, medium integrity, 96 DPI, one 1600×900 display. The operator was present and consented.
+
+**This is not a #2-only result on old `main`.** #2 alone on `main` still reproduces the first run's product failures.
+
+Report: `docs/proofs/wa-p1b-native-proof-2026-10-17.json` (SHA-256 `db0eb64e…6b06`).
+
+## Result: `23 PASS · 0 FAIL · 1 BLOCKED · 2 UNSUPPORTED`
+
+| Case | 2026-10-16 | 2026-10-17 | Source of change |
+|---|---|---|---|
+| C04B password handling | FAIL | **PASS** | **Product** (#3 F1 + review). **Harness** too: the password box is now bound by fixture geometry + edit class (1 candidate), not by `automationId` |
+| C04C exact-window geometry | FAIL | **PASS** | Product (#3 F2) |
+| C09 absent-text wait | FAIL | **PASS** | Product (#3 F3). Evidence reason `WORKER_BUDGET_REACHED`: a contract-shaped wait (timeout = wall clock) is always ended by the inner budget |
+| C10 wait longer than its wall clock | PASS (watchdog kill) | **PASS** (typed refusal `WAIT_TIMEOUT_EXCEEDS_WALL_CLOCK`) | Product (#3 review). **Harness:** the expectation now accepts the typed refusal or the watchdog, never `matched=false` |
+| R05 region outside the displays | FAIL | **PASS** | Product (#3 F4) |
+| W01 stalled synthetic worker | — (new) | **PASS** | Harness (new case). Killed at its wall clock, child process gone, no observation involved |
+| U03 native C# skeleton | BLOCKED | **PASS** | Product (#5) + harness. A HANDSHAKE from the built skeleton decodes under the strict v1 decoder (no CRLF) |
+| U02 oversized or malformed real-worker output | BLOCKED | BLOCKED | Unproven: cannot be forced without modifying the real worker (fake-worker tests only) |
+| U01 other sessions, secure desktop | UNSUPPORTED | UNSUPPORTED | Unproven on this host (WA-P1C) |
+| U04 mixed DPI, negative coordinates | UNSUPPORTED | UNSUPPORTED | Single display at 100 % (WA-P1C) |
+| All other cases | PASS | PASS | unchanged |
+
+**Intermediate run, kept for honesty.** Unmodified #2 harness on #3 before the review hardening gave 19 PASS · 2 FAIL (C04B harness binding, C10 premise). Both are explained above.
+
+**Harness defect observed and fixed.** One earlier attempt crashed parsing an incomplete ready chunk, before any observation. The follow-up parses only complete, exact-prefixed records.
+
+## Still open (not claimed)
+
+- **Foreign elements in display/region UI snapshots.** Their names are now redacted unless positively safe (#3 policy), but UIA still has no occlusion model.
+- **WinForms ordinary text boxes are `UNKNOWN`.** They surface as `Pane`, which fails closed.
+- **The adapter result still carries only the `hwnd-<n>` locator.** Provider-evidence wiring (generation, PID, creation time) is WA-P1A.1 follow-up work.
+- **WA-P1C (environment matrix) has not been started.**
