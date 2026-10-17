@@ -21,7 +21,11 @@ test("WA-P1A.1 native skeleton mirrors strict one-line protocol law without muta
 
   for (const required of [
     "RequireExactTopLevelFields",
-    "Console.In.Peek()",
+    "Console.OpenStandardInput()",
+    "Console.OpenStandardOutput()",
+    "RequireStrictPayload",
+    "FRAME_ENCODING_INVALID",
+    "FRAME_UNTERMINATED",
     "FRAME_MULTILINE",
     "FRAME_TOO_LARGE",
     "PROTOCOL_MISMATCH",
@@ -38,6 +42,10 @@ test("WA-P1A.1 native skeleton mirrors strict one-line protocol law without muta
       required,
     );
   }
+
+  // LF-only framing: responses must never go through WriteLine (CRLF on Windows).
+  assert.equal(source.includes("Console.Out.WriteLine"), false, "Console.Out.WriteLine");
+  assert.equal(source.includes("Console.In.ReadLine"), false, "Console.In.ReadLine");
 
   for (const forbidden of [
     "Process.Start",
