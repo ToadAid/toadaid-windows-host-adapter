@@ -1,5 +1,6 @@
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+$script:WorkerDeadlineUtc = $null
 
 function Sha256-Bytes([byte[]]$Bytes) {
   $sha = [System.Security.Cryptography.SHA256]::Create()
@@ -61,6 +62,8 @@ namespace ToadAid {
   public static class User32 {
     [DllImport("user32.dll")]
     public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongW")]
+    public static extern int GetWindowLong(IntPtr hWnd, int nIndex);
   }
 }
 "@
@@ -98,6 +101,43 @@ function Display-Inventory {
   return ,$items
 }
 
+# WA-P1A.2 F4: a region is capturable only if every point of it lies on some
+# display. Exact for axis-aligned rectangles: split the region at every display
+# edge and require each cell to be covered. Pure; unit-tested by dot-sourcing.
+function Region-CoveredByDisplays([object]$Region, [object[]]$Displays) {
+  $l = [double]$Region.left; $t = [double]$Region.top
+  $r = [double]$Region.right; $b = [double]$Region.bottom
+  if (-not ($r -gt $l -and $b -gt $t)) { return $false }
+  $xs = [System.Collections.Generic.SortedSet[double]]::new()
+  $ys = [System.Collections.Generic.SortedSet[double]]::new()
+  $null = $xs.Add($l); $null = $xs.Add($r); $null = $ys.Add($t); $null = $ys.Add($b)
+  foreach ($d in $Displays) {
+    foreach ($x in @([double]$d.left, [double]$d.right)) { if ($x -gt $l -and $x -lt $r) { $null = $xs.Add($x) } }
+    foreach ($y in @([double]$d.top, [double]$d.bottom)) { if ($y -gt $t -and $y -lt $b) { $null = $ys.Add($y) } }
+  }
+  $xa = @($xs); $ya = @($ys)
+  for ($i = 0; $i -lt $xa.Count - 1; $i++) {
+    for ($j = 0; $j -lt $ya.Count - 1; $j++) {
+      $cx = ($xa[$i] + $xa[$i + 1]) / 2; $cy = ($ya[$j] + $ya[$j + 1]) / 2
+      $covered = $false
+      foreach ($d in $Displays) {
+        if ($cx -ge [double]$d.left -and $cx -lt [double]$d.right -and $cy -ge [double]$d.top -and $cy -lt [double]$d.bottom) { $covered = $true; break }
+      }
+      if (-not $covered) { return $false }
+    }
+  }
+  return $true
+}
+
+function Display-Rects {
+  Add-Type -AssemblyName System.Windows.Forms
+  $out = @()
+  foreach ($s in [System.Windows.Forms.Screen]::AllScreens) {
+    $out += @{ left = [double]$s.Bounds.Left; top = [double]$s.Bounds.Top; right = [double]$s.Bounds.Right; bottom = [double]$s.Bounds.Bottom }
+  }
+  return ,$out
+}
+
 function Resolve-AuthorizedRects([object]$Parameters) {
   Add-Type -AssemblyName System.Windows.Forms
   $rects = @()
@@ -133,6 +173,8 @@ function Resolve-AuthorizedRects([object]$Parameters) {
       if (-not $contained) {
         throw "requested region is not contained by an authorized display"
       }
+    } elseif (-not (Region-CoveredByDisplays $regionRect (Display-Rects))) {
+      throw "requested region is not fully on a display"
     }
 
     return ,@($regionRect)
@@ -325,27 +367,72 @@ function Screenshot-Artifacts(
   }
 }
 
+# WA-P1A.2 F1: names are recorded only for elements positively known to be
+# non-input display text. Anything input-like, password-like, or not
+# positively classified has its name withheld (fail closed); UIA's own
+# classification alone is not trusted (native WinForms edits surface as Pane
+# with their value as Name). Pure decision over observed facts; unit-tested.
+$script:NameSafeControlTypes = @(
+  "ControlType.Text", "ControlType.Button", "ControlType.CheckBox", "ControlType.RadioButton",
+  "ControlType.MenuItem", "ControlType.MenuBar", "ControlType.Menu", "ControlType.TabItem",
+  "ControlType.Tab", "ControlType.ListItem", "ControlType.TreeItem", "ControlType.Hyperlink",
+  "ControlType.Image", "ControlType.Group", "ControlType.Window", "ControlType.TitleBar",
+  "ControlType.Header", "ControlType.HeaderItem", "ControlType.ToolBar", "ControlType.StatusBar",
+  "ControlType.ToolTip", "ControlType.Separator", "ControlType.ScrollBar", "ControlType.Thumb",
+  "ControlType.List", "ControlType.Tree"
+)
+
+function Text-PolicyFor([object]$Facts) {
+  $type = [string]$Facts.controlType
+  $class = [string]$Facts.className
+  $editClass = $class -match '(?i)(edit|richedit|textbox|password|passwordbox)'
+  $editType = @("ControlType.Edit", "ControlType.Document", "ControlType.ComboBox") -contains $type
+  $esPassword = $editClass -and (([int64]$Facts.win32Style -band 0x20) -ne 0)
+  $sensitive = [bool]$Facts.isPassword -or $esPassword -or ($class -match '(?i)password') -or [bool]$Facts.factsIncomplete
+  $inputLike = $editType -or $editClass -or [bool]$Facts.valuePattern -or [bool]$Facts.textPattern
+  $safeWin32Class = $class -match '^(?i:Static|Button|#32770)$' -or $class -match '^WindowsForms10\.(?i:STATIC|BUTTON|Window)\.'
+  $nameSafe = (-not $sensitive) -and (-not $inputLike) -and (
+    ($script:NameSafeControlTypes -contains $type) -or
+    ((@("ControlType.Pane", "ControlType.Custom") -contains $type) -and $safeWin32Class)
+  )
+  if ($sensitive) {
+    $security = "SECRET_OR_PASSWORD"
+  } elseif ($type -eq "ControlType.Edit" -and [bool]$Facts.valuePattern -and -not $editClass -and [int64]$Facts.nativeWindowHandle -eq 0) {
+    $security = "ORDINARY_TEXT"
+  } elseif ($type -eq "ControlType.Edit" -and [bool]$Facts.valuePattern -and $editClass -and -not $esPassword -and [bool]$Facts.win32StyleKnown) {
+    $security = "ORDINARY_TEXT"
+  } else {
+    $security = "UNKNOWN"
+  }
+  return @{ inputSecurity = $security; nameRecorded = [bool]$nameSafe }
+}
+
+function Element-TextFacts([System.Windows.Automation.AutomationElement]$Element) {
+  $facts = @{ controlType = ""; className = ""; isPassword = $false; valuePattern = $false; textPattern = $false; nativeWindowHandle = 0; win32Style = 0; win32StyleKnown = $false; factsIncomplete = $false }
+  try {
+    $facts.controlType = [string]$Element.Current.ControlType.ProgrammaticName
+    $facts.className = [string]$Element.Current.ClassName
+    $facts.isPassword = [bool]$Element.Current.IsPassword
+    $facts.nativeWindowHandle = [int64]$Element.Current.NativeWindowHandle
+    $facts.valuePattern = [bool]$Element.GetCurrentPropertyValue([System.Windows.Automation.AutomationElement]::IsValuePatternAvailableProperty)
+    $facts.textPattern = [bool]$Element.GetCurrentPropertyValue([System.Windows.Automation.AutomationElement]::IsTextPatternAvailableProperty)
+  } catch {
+    $facts.factsIncomplete = $true
+  }
+  if ($facts.nativeWindowHandle -ne 0) {
+    try {
+      Add-User32
+      $facts.win32Style = [int64][ToadAid.User32]::GetWindowLong([IntPtr]::new($facts.nativeWindowHandle), -16)
+      $facts.win32StyleKnown = $true
+    } catch {
+      $facts.factsIncomplete = $true
+    }
+  }
+  return $facts
+}
+
 function Input-Security([System.Windows.Automation.AutomationElement]$Element) {
-  try {
-    if ([bool]$Element.Current.IsPassword) {
-      return "SECRET_OR_PASSWORD"
-    }
-  } catch {}
-
-  try {
-    $isEdit =
-      $Element.Current.ControlType.Id -eq
-      [System.Windows.Automation.ControlType]::Edit.Id
-    $supportsValue =
-      [bool]$Element.GetCurrentPropertyValue(
-        [System.Windows.Automation.AutomationElement]::IsValuePatternAvailableProperty
-      )
-    if ($isEdit -and $supportsValue) {
-      return "ORDINARY_TEXT"
-    }
-  } catch {}
-
-  return "UNKNOWN"
+  return (Text-PolicyFor (Element-TextFacts $Element)).inputSecurity
 }
 
 function Ui-Snapshot(
@@ -364,6 +451,7 @@ function Ui-Snapshot(
   $walker = [System.Windows.Automation.TreeWalker]::RawViewWalker
   $queue = [System.Collections.Generic.Queue[System.Windows.Automation.AutomationElement]]::new()
   $authorizedRects = $null
+  $windowScopeRects = $null
   $root = $null
 
   if ($null -ne $Parameters.windowId) {
@@ -378,6 +466,17 @@ function Ui-Snapshot(
     if ($null -eq $root) {
       throw "window handle is unavailable"
     }
+    # WA-P1A.2 F2: exact-window evidence must lie inside the window's own bounds.
+    $windowRect = $root.Current.BoundingRectangle
+    if (-not (Rect-IsValid $windowRect)) {
+      throw "window geometry is unavailable"
+    }
+    $windowScopeRects = @(@{
+      left = [double]$windowRect.Left
+      top = [double]$windowRect.Top
+      right = [double]($windowRect.Left + $windowRect.Width)
+      bottom = [double]($windowRect.Top + $windowRect.Height)
+    })
     $child = $walker.GetFirstChild($root)
     while ($null -ne $child) {
       $queue.Enqueue($child)
@@ -429,15 +528,26 @@ function Ui-Snapshot(
         $recordElement =
           Rect-ContainedByAny $rect $authorizedRects
       }
+      if (
+        $recordElement -and
+        $null -ne $windowScopeRects
+      ) {
+        $recordElement =
+          Rect-ContainedByAny $rect $windowScopeRects
+      }
     } catch {
       $recordElement = $false
     }
 
     if ($recordElement) {
       try {
-        $name = [string]$element.Current.Name
-        if ($name.Length -gt 256) {
-          $name = $name.Substring(0, 256)
+        $policy = Text-PolicyFor (Element-TextFacts $element)
+        $name = $null
+        if ($policy.nameRecorded) {
+          $name = [string]$element.Current.Name
+          if ($name.Length -gt 256) {
+            $name = $name.Substring(0, 256)
+          }
         }
         $automationId = [string]$element.Current.AutomationId
         if ($automationId.Length -gt 256) {
@@ -452,6 +562,7 @@ function Ui-Snapshot(
 
         $record = @{
           name = $name
+          nameRedacted = (-not $policy.nameRecorded)
           automationId = $automationId
           className = $className
           controlType = $controlType
@@ -477,7 +588,7 @@ function Ui-Snapshot(
           $elements += @{
             elementId = $elementId
             evidenceSha256 = $evidenceSha
-            inputSecurity = Input-Security $element
+            inputSecurity = $policy.inputSecurity
           }
         }
       } catch {}
@@ -583,10 +694,18 @@ function Wait-For(
 
   $hwnd = Hwnd-FromId ([string]$Parameters.windowId)
   $token = Artifact-Token $Epoch
+  # WA-P1A.2 F3: finish before the adapter's outer wall clock so an absent
+  # match can be reported as matched=false; never run past the outer deadline.
   $deadline = [DateTime]::UtcNow.AddMilliseconds([int]$Parameters.timeoutMs)
+  if ($null -ne $WorkerDeadlineUtc -and $WorkerDeadlineUtc -lt $deadline) {
+    $deadline = $WorkerDeadlineUtc
+  }
+  if ([DateTime]::UtcNow -ge $deadline) {
+    throw "wait deadline exhausted before the first check"
+  }
   $matched = $false
 
-  while ([DateTime]::UtcNow -lt $deadline) {
+  while ($true) {
     $window = [System.Windows.Automation.AutomationElement]::FromHandle($hwnd)
     if ($null -ne $window) {
       switch ([string]$Parameters.condition) {
@@ -594,15 +713,23 @@ function Wait-For(
           $matched = ([ToadAid.User32]::GetForegroundWindow() -eq $hwnd)
         }
         "text_exists" {
+          # WA-P1A.2 F1: only name-safe (non-input) text can satisfy the wait,
+          # so a wait cannot be used as an oracle for password/input values.
           $condition = [System.Windows.Automation.PropertyCondition]::new(
             [System.Windows.Automation.AutomationElement]::NameProperty,
             [string]$Parameters.text
           )
-          $found = $window.FindFirst(
+          $found = $window.FindAll(
             [System.Windows.Automation.TreeScope]::Descendants,
             $condition
           )
-          $matched = ($null -ne $found)
+          $matched = $false
+          foreach ($candidate in $found) {
+            if ((Text-PolicyFor (Element-TextFacts $candidate)).nameRecorded) {
+              $matched = $true
+              break
+            }
+          }
         }
         "focused_element" {
           $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
@@ -620,7 +747,14 @@ function Wait-For(
       break
     }
 
-    Start-Sleep -Milliseconds ([int]$Parameters.intervalMs)
+    $remainingMs = ($deadline - [DateTime]::UtcNow).TotalMilliseconds
+    if ($remainingMs -le 0) {
+      break
+    }
+    Start-Sleep -Milliseconds ([int][Math]::Max(1, [Math]::Min([double]$Parameters.intervalMs, $remainingMs)))
+    if ([DateTime]::UtcNow -ge $deadline) {
+      break
+    }
   }
 
   $id = "wait-result-$token-0"
@@ -637,11 +771,15 @@ function Wait-For(
   }
 }
 
+function Invoke-ObservationWorker {
 $stdin = [Console]::In.ReadToEnd()
 $envelope = $stdin | ConvertFrom-Json
 $request = $envelope.request
 $artifactRoot = [System.IO.Path]::GetFullPath([string]$envelope.artifactRoot)
-
+$script:WorkerDeadlineUtc = $null
+if ($envelope.PSObject.Properties.Name -contains "workerDeadlineUtcMs" -and $null -ne $envelope.workerDeadlineUtcMs) {
+  $script:WorkerDeadlineUtc = [DateTimeOffset]::FromUnixTimeMilliseconds([int64]$envelope.workerDeadlineUtcMs).UtcDateTime
+}
 [System.IO.Directory]::CreateDirectory($artifactRoot) | Out-Null
 
 $parameters = $request.parameters
@@ -731,3 +869,9 @@ if ($null -ne $matched) {
 [Console]::Out.Write(
   ($result | ConvertTo-Json -Depth 20 -Compress)
 )
+}
+
+# Dot-sourcing (". worker.ps1") loads the pure functions for unit tests only.
+if ($MyInvocation.InvocationName -ne ".") {
+  Invoke-ObservationWorker
+}

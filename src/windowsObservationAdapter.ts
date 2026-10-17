@@ -68,7 +68,22 @@ export interface WindowsObservationWorker {
   run(
     request: DesktopObservationAdapterRequest,
     artifactRoot: string,
+    workerDeadlineUtcMs?: number,
   ): Promise<WindowsObservationWorkerResponse>;
+}
+
+/**
+ * WA-P1A.2 F3: the worker must finish (and report, e.g. `matched=false`)
+ * before the adapter's outer wall clock kills it. The worker receives an
+ * inner deadline this many milliseconds before the outer one.
+ */
+export function workerDeadlineReserveMs(
+  maxWallClockMs: number,
+): number {
+  return Math.min(
+    750,
+    Math.floor(maxWallClockMs / 4),
+  );
 }
 
 export interface WindowsObservationAdapterOptions {
@@ -411,6 +426,7 @@ class PowerShellWindowsObservationWorker
   async run(
     request: DesktopObservationAdapterRequest,
     artifactRoot: string,
+    workerDeadlineUtcMs?: number,
   ): Promise<WindowsObservationWorkerResponse> {
     const invocation =
       buildWindowsPowerShellInvocation(
@@ -524,6 +540,8 @@ class PowerShellWindowsObservationWorker
           JSON.stringify({
             request,
             artifactRoot,
+            workerDeadlineUtcMs:
+              workerDeadlineUtcMs ?? null,
           }),
           "utf8",
         );
@@ -625,6 +643,11 @@ export function createWindowsDesktopObservationAdapter(
           await worker.run(
             request,
             artifactRoot,
+            Date.now() +
+              request.maxWallClockMs -
+              workerDeadlineReserveMs(
+                request.maxWallClockMs,
+              ),
           ),
           request,
         );

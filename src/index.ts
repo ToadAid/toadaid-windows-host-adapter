@@ -2,6 +2,7 @@ export {
   buildWindowsPowerShellInvocation,
   createWindowsDesktopObservationAdapter,
   defaultWindowsPowerShellPath,
+  workerDeadlineReserveMs,
 } from "./windowsObservationAdapter.js";
 
 export type {
