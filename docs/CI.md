@@ -45,7 +45,10 @@ Workflow: `.github/workflows/ci.yml`. Runs on pull requests and pushes to `main`
 
 Both `build + tests` jobs snapshot the test-owned entries (`toadaid-*`,
 `wa-p1a2-*`) directly inside the OS temp directory before `npm test` and fail
-if new ones remain afterwards (`scripts/test-temp-leaks.mjs`). The gate only
+if new ones remain afterwards (`scripts/test-temp-leaks.mjs`). The verify step
+runs even when `npm test` failed (`if: always()`), but only when the snapshot
+step succeeded; the job still fails on the original test failure, so a clean
+leak check can never mask it. The gate only
 reports each leftover's name, file count and size; it never deletes, moves or
 reads anything. Tests own their temp roots through
 `test/support/tempRoot.ts` (`withTempRoot`), which removes exactly the root it
