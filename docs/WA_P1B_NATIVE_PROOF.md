@@ -171,3 +171,13 @@ Report: `docs/proofs/wa-p1b-native-proof-2026-10-17.json` (SHA-256 `db0eb64e…6
 - **WinForms ordinary text boxes are `UNKNOWN`.** They surface as `Pane`, which fails closed.
 - **The adapter result still carries only the `hwnd-<n>` locator.** Provider-evidence wiring (generation, PID, creation time) is WA-P1A.1 follow-up work.
 - **WA-P1C (environment matrix) has not been started.**
+
+## Harness portability and preflight (WA-PROOF-PORTABILITY-P1, issue #17)
+
+Source and capability identity are now resolved by `scripts/wa-p1b/sourceIdentity.mjs` **before** any temp directory, fixture window or observation exists, so a refusal leaves nothing behind:
+
+- **Source identity** uses supported git commands (`rev-parse --show-toplevel`, `rev-parse --verify HEAD^{commit}`, `symbolic-ref`, `--git-dir`/`--git-common-dir`, `status --porcelain`) instead of reading `.git/HEAD`. A clean clone and a linked `git worktree` resolve to the same commit (`worktree: MAIN | LINKED`). Missing git, a repository root that is not the harness root, a HEAD that is not a single commit, and a dirty work tree (modified or untracked entries) are refused.
+- **Capability identity** trusts a lockfile only when git tracks it unmodified in HEAD; an untracked lockfile is refused even if it matches. The pinned (`package.json`), locked and actually installed (`node_modules/.package-lock.json`) commits must all be the approved `bd55a3d8fd45aeabe717e794263e04b4032fa242`, and the built `desktopObservation.js` must hash to `310e30a2058f56e1310475bd20752d8883573028f836fd946fcaedb400172cda`. Without a committed lockfile the manifest-pin fallback is used only with `--accept-manifest-pin-without-lockfile`, and the report then says `ABSENT_MANIFEST_PIN_FALLBACK`.
+- Refusals print `WA_P1B_PREFLIGHT_REFUSED code=<WA_P1B_…>` and exit 4. `--preflight-only` runs just these checks on any OS, never observes and never creates a temp directory.
+
+The 2026-10-16 and 2026-10-17 proof reports above were produced by the earlier harness and are unchanged; any later native re-proof still requires the operator to be present and consenting.
