@@ -20,19 +20,22 @@
 // leaves output this script can verify and remove next time.
 //
 // `mark` (run right after a successful tsc) completes the marker: package,
-// tsconfig used, git HEAD, and the SHA-256 of every source file compiled, so
-// the output stays traceable to the source it was built from. It requires the
-// "building" marker from `clean --prepare`.
+// tsconfig used, the SHA-256 of that tsconfig and of every config it extends,
+// the git HEAD commit, and the SHA-256 of every source file compiled, so the
+// output stays traceable to the source and HEAD it was built from. It requires
+// the "building" marker from `clean --prepare` and refuses when git HEAD
+// cannot be resolved or a config cannot be verified.
 //
 // `run-tests` runs exactly the compiled tests that correspond to the current
 // test/**/*.test.ts sources, and refuses (exit 2) if dist holds any compiled
 // test without a current source (a stale test), lacks one, was built by a
-// config without tests, or was built from different source bytes.
+// config without tests, or was built from different source bytes, a different
+// git HEAD, or different compiler configuration bytes.
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lstat, mkdir, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const PACKAGE_NAME = "@toadaid/windows-host-adapter";
@@ -146,6 +149,34 @@ function baseMarker() {
   return { schema: MARKER_SCHEMA, package: PACKAGE_NAME, generatedBy: "scripts/dist-hygiene.mjs" };
 }
 
+async function currentHead(root) {
+  const out = git(root, ["rev-parse", "--verify", "HEAD^{commit}"]);
+  const head = out === null ? "" : out.trim();
+  return /^[0-9a-f]{40}([0-9a-f]{24})?$/.test(head) ? head : null;
+}
+
+/** SHA-256 of `config` and of every config it extends (relative paths only), keyed by repo-relative path. */
+async function configHashes(root, config) {
+  const out = {};
+  let rel = config;
+  for (let depth = 0; depth < 8; depth += 1) {
+    if (Object.hasOwn(out, rel)) refuse(`compiler configuration extends itself in a cycle at ${rel}`);
+    const abs = resolve(root, ...rel.split("/"));
+    const inside = relative(root, abs);
+    if (inside === "" || inside.startsWith("..") || isAbsolute(inside)) refuse(`compiler configuration ${rel} is outside the repository`);
+    let bytes;
+    try { bytes = await readFile(abs); } catch { refuse(`compiler configuration ${rel} is missing`); }
+    out[rel] = createHash("sha256").update(bytes).digest("hex");
+    let parsed;
+    try { parsed = JSON.parse(bytes.toString("utf8")); } catch { refuse(`compiler configuration ${rel} is not plain JSON; cannot verify what it extends`); }
+    const ext = parsed?.extends;
+    if (ext === undefined) return out;
+    if (typeof ext !== "string" || !(ext.startsWith("./") || ext.startsWith("../"))) refuse(`compiler configuration ${rel} extends ${JSON.stringify(ext)}, which cannot be verified`);
+    rel = relative(root, resolve(dirname(abs), ext)).split(sep).join("/");
+  }
+  return refuse("compiler configuration extends chain is too deep");
+}
+
 async function clean(root, prepare) {
   const found = await inspectDist(root);
   const dist = join(root, "dist");
@@ -169,12 +200,14 @@ async function mark(root, config) {
   if (st.isSymbolicLink() || !st.isDirectory()) refuse("dist is not a real directory");
   const prior = await readMarker(dist);
   if (prior.status !== "building") refuse("dist was not prepared by `clean --prepare` for this build");
-  const headOut = git(root, ["rev-parse", "HEAD"]);
+  const head = await currentHead(root);
+  if (head === null) refuse("git HEAD cannot be resolved; a build must be traceable to a commit");
   const marker = {
     ...baseMarker(),
     status: "complete",
     config,
-    head: headOut === null ? null : headOut.trim(),
+    configs: await configHashes(root, config),
+    head,
     sources: await sourceFiles(root, SOURCE_DIRS[config]),
   };
   await writeFile(join(dist, MARKER), `${JSON.stringify(marker, null, 2)}\n`, "utf8");
@@ -192,6 +225,11 @@ async function runTests(root, list) {
   const a = JSON.stringify(Object.entries(current));
   const b = JSON.stringify(Object.entries(marker.sources ?? {}));
   if (a !== b) refuse("dist was built from different source files than the current checkout; rebuild");
+  const head = await currentHead(root);
+  if (head === null) refuse("git HEAD cannot be resolved; cannot verify which commit dist belongs to");
+  if (typeof marker.head !== "string" || marker.head !== head) refuse(`dist was built at a different git HEAD (${marker.head ?? "none recorded"}) than the current checkout (${head}); rebuild`);
+  const configs = await configHashes(root, marker.config);
+  if (JSON.stringify(Object.entries(configs)) !== JSON.stringify(Object.entries(marker.configs ?? {}))) refuse("dist was built with different compiler configuration bytes than the current checkout; rebuild");
   const expected = Object.keys(current).filter((f) => f.startsWith("test/") && f.endsWith(".test.ts")).map((f) => f.replace(/\.ts$/, ".js"));
   const compiled = entries.filter((e) => e.startsWith("test/") && e.endsWith(".test.js"));
   const stale = compiled.filter((e) => !expected.includes(e));

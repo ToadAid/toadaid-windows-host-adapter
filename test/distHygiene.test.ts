@@ -25,6 +25,13 @@ function git(root: string, ...args: string[]): void {
   assert.equal(r.status, 0, `git ${args.join(" ")}: ${r.stderr}`);
 }
 
+function commit(root: string, message: string): void {
+  git(root, "-c", "user.name=dist-hygiene fixture", "-c", "user.email=fixture@invalid", "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", message);
+}
+
+const TSCONFIG = `${JSON.stringify({ compilerOptions: { outDir: "dist", target: "ES2022" }, include: ["src/**/*.ts", "test/**/*.ts"] })}\n`;
+const TSCONFIG_BUILD = `${JSON.stringify({ extends: "./tsconfig.json", include: ["src/**/*.ts"] })}\n`;
+
 const CURRENT_TEST = 'import test from "node:test";\ntest("fixture: current compiled test", () => {});\n';
 const STALE_TEST = [
   'import { writeFileSync } from "node:fs";',
@@ -44,6 +51,10 @@ async function fixture(): Promise<string> {
   await mkdir(join(root, "test"));
   await writeFile(join(root, "src", "a.ts"), "export const a = 1;\n");
   await writeFile(join(root, "test", "a.test.ts"), CURRENT_TEST);
+  await writeFile(join(root, "tsconfig.json"), TSCONFIG);
+  await writeFile(join(root, "tsconfig.build.json"), TSCONFIG_BUILD);
+  git(root, "add", "package.json", "src", "test", "tsconfig.json", "tsconfig.build.json");
+  commit(root, "fixture: initial sources");
   const p = hygiene(root, "clean", "--prepare");
   assert.equal(p.status, 0, p.stderr);
   await mkdir(join(root, "dist", "src"), { recursive: true });
@@ -133,6 +144,62 @@ test("WA-BUILD-CLEAN-P1: run-tests refuses dist built from other source bytes or
     const r = hygiene(root, "run-tests");
     assert.equal(r.status, 2);
     assert.match(r.stderr, /does not compile the tests/);
+  });
+});
+
+test("WA-BUILD-CLEAN-P1 review: run-tests refuses a build from a different git HEAD with unchanged sources, and mark refuses without a HEAD", async () => {
+  await withFixture(async (root) => {
+    // a new commit (e.g. a branch switch) that leaves every TS source and test file byte-identical
+    await writeFile(join(root, "NOTES.md"), "unrelated change\n");
+    git(root, "add", "NOTES.md");
+    commit(root, "fixture: unrelated commit");
+    const r = hygiene(root, "run-tests");
+    assert.equal(r.status, 2, `expected a refusal, got: ${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, /different git HEAD/);
+    // rebuilding at the new HEAD is accepted again
+    assert.equal(hygiene(root, "clean", "--prepare").status, 0);
+    await mkdir(join(root, "dist", "test"), { recursive: true });
+    await writeFile(join(root, "dist", "test", "a.test.js"), CURRENT_TEST);
+    assert.equal(hygiene(root, "mark", "--config", "tsconfig.json").status, 0);
+    assert.equal(hygiene(root, "run-tests", "--list").status, 0);
+  });
+  const bare = await mkdtemp(join(tmpdir(), "toadaid-dist-hygiene-"));
+  try {
+    await writeFile(join(bare, "package.json"), `${JSON.stringify({ name: PACKAGE, private: true })}\n`);
+    await writeFile(join(bare, "tsconfig.json"), TSCONFIG);
+    git(bare, "init", "-q");
+    assert.equal(hygiene(bare, "clean", "--prepare").status, 0);
+    const m = hygiene(bare, "mark", "--config", "tsconfig.json");
+    assert.equal(m.status, 2);
+    assert.match(m.stderr, /git HEAD cannot be resolved/);
+  } finally {
+    await rm(bare, { recursive: true, force: true });
+  }
+});
+
+test("WA-BUILD-CLEAN-P1 review: run-tests refuses a build made with different compiler configuration bytes, including an extended base config", async () => {
+  await withFixture(async (root) => {
+    const marker = JSON.parse(await readFile(join(root, "dist", ".toadaid-dist-owner.json"), "utf8")) as { configs: Record<string, string> };
+    assert.deepEqual(Object.keys(marker.configs), ["tsconfig.json"]);
+    // compiler options change; no TS source or test file changes
+    await writeFile(join(root, "tsconfig.json"), `${JSON.stringify({ compilerOptions: { outDir: "dist", target: "ES2020" }, include: ["src/**/*.ts", "test/**/*.ts"] })}\n`);
+    const r = hygiene(root, "run-tests");
+    assert.equal(r.status, 2, `expected a refusal, got: ${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, /different compiler configuration/);
+  });
+  await withFixture(async (root) => {
+    assert.equal(hygiene(root, "clean", "--prepare").status, 0);
+    assert.equal(hygiene(root, "mark", "--config", "tsconfig.build.json").status, 0);
+    const marker = JSON.parse(await readFile(join(root, "dist", ".toadaid-dist-owner.json"), "utf8")) as { configs: Record<string, string> };
+    assert.deepEqual(Object.keys(marker.configs), ["tsconfig.build.json", "tsconfig.json"], "the extended base config is recorded too");
+    const base = createHash("sha256").update(await readFile(join(root, "tsconfig.json"))).digest("hex");
+    assert.equal(marker.configs["tsconfig.json"], base);
+    await writeFile(join(root, "tsconfig.json"), `${JSON.stringify({ extends: "some-package/tsconfig" })}\n`);
+    assert.equal(hygiene(root, "clean", "--prepare").status, 0);
+    await writeFile(join(root, "tsconfig.build.json"), TSCONFIG_BUILD);
+    const m = hygiene(root, "mark", "--config", "tsconfig.build.json");
+    assert.equal(m.status, 2);
+    assert.match(m.stderr, /cannot be verified/);
   });
 });
 

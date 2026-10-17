@@ -16,12 +16,18 @@ All of this lives in `scripts/dist-hygiene.mjs`.
 ## Ownership marker
 
 `dist/.toadaid-dist-owner.json` records the package, the `status`
-(`building` → `complete`), the tsconfig used, the git `HEAD`, and the SHA-256
-of every source file compiled. `run-tests` refuses unless the marker is
-`complete`, came from `tsconfig.json`, and matches the current source bytes,
-and unless the set of compiled `dist/test/**/*.test.js` files equals the
-current sources exactly (an extra file is reported as a stale compiled test
-and never executed).
+(`building` → `complete`), the tsconfig used, the SHA-256 of that tsconfig and
+of every config it `extends` (relative paths only), the git `HEAD` commit, and
+the SHA-256 of every source file compiled. `mark` refuses when git `HEAD`
+cannot be resolved or an `extends` target cannot be verified.
+
+`run-tests` refuses unless the marker is `complete`, came from `tsconfig.json`,
+and matches the current source bytes, the current git `HEAD` and the current
+compiler configuration bytes, and unless the set of compiled
+`dist/test/**/*.test.js` files equals the current sources exactly (an extra
+file is reported as a stale compiled test and never executed). `npm test`
+always rebuilds first, so these refusals only matter when `run-tests` is
+called directly on an older build.
 
 ## When the cleanup refuses
 
