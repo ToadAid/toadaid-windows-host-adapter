@@ -72,12 +72,20 @@ jobs:
         shell: bash
         run: npm run build
 
+      - name: Snapshot test-owned temp entries
+        shell: bash
+        run: node scripts/test-temp-leaks.mjs snapshot "$RUNNER_TEMP/toadaid-test-temp-snapshot.json"
+
       - name: Tests (live desktop observation is never enabled on CI)
         shell: bash
         env:
           TOADAID_NATIVE_OBSERVATION_TESTS: ""
           TOADAID_NATIVE_CSHARP_WORKER: ""
         run: npm test
+
+      - name: No test-owned temp directories left behind
+        shell: bash
+        run: node scripts/test-temp-leaks.mjs verify "$RUNNER_TEMP/toadaid-test-temp-snapshot.json"
 
   native-dotnet10:
     # Automated .NET 10 build + strict Node/C# interop for the native skeleton
