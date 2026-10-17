@@ -164,7 +164,8 @@ function normalizeJson(
     if (
       key.length < 1 ||
       key.length > 128 ||
-      key.includes("\u0000")
+      key.includes("\u0000") ||
+      key === "__proto__"
     ) {
       throw new TypeError(
         "provider protocol payload key is invalid",
@@ -345,6 +346,56 @@ export function validateProviderResponseEnvelope(
   });
 }
 
+const STRICT_UTF8 = new TextDecoder("utf-8", {
+  fatal: true,
+  ignoreBOM: true,
+});
+
+/**
+ * Refuses a JSON text in which any object repeats a key. JSON.parse keeps the
+ * last value silently, which would let a frame smuggle e.g. a second `kind`.
+ * Keys are compared after JSON unescaping. The text is assumed to be valid
+ * JSON (JSON.parse runs first); this scanner only tracks strings and nesting.
+ */
+function assertNoDuplicateKeys(text: string): void {
+  const stack: (Set<string> | null)[] = [];
+  let expectKey = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (ch === "{") {
+      stack.push(new Set<string>());
+      expectKey = true;
+    } else if (ch === "[") {
+      stack.push(null);
+      expectKey = false;
+    } else if (ch === "}" || ch === "]") {
+      stack.pop();
+      expectKey = false;
+    } else if (ch === ",") {
+      expectKey = stack.at(-1) instanceof Set;
+    } else if (ch === "\"") {
+      let j = i + 1;
+      while (j < text.length && text[j] !== "\"") {
+        j += text[j] === "\\" ? 2 : 1;
+      }
+      if (expectKey) {
+        const key = JSON.parse(text.slice(i, j + 1)) as string;
+        const keys = stack.at(-1);
+        if (keys instanceof Set) {
+          if (keys.has(key)) {
+            throw new Error(
+              "provider protocol frame contains a duplicate key",
+            );
+          }
+          keys.add(key);
+        }
+        expectKey = false;
+      }
+      i = j;
+    }
+  }
+}
+
 function boundedFrameText(
   input: Uint8Array | string,
 ): string {
@@ -361,7 +412,14 @@ function boundedFrameText(
       "provider protocol frame size is invalid",
     );
   }
-  const text = bytes.toString("utf8");
+  let text: string;
+  try {
+    text = STRICT_UTF8.decode(bytes);
+  } catch {
+    throw new TypeError(
+      "provider protocol frame is not valid UTF-8",
+    );
+  }
   if (!text.endsWith("\n")) {
     throw new Error(
       "provider protocol frame must end with newline",
@@ -412,6 +470,7 @@ export function decodeProviderRequestFrame(
       "provider request frame contains invalid JSON",
     );
   }
+  assertNoDuplicateKeys(body);
   return validateProviderRequestEnvelope(parsed);
 }
 
@@ -427,6 +486,7 @@ export function decodeProviderResponseFrame(
       "provider response frame contains invalid JSON",
     );
   }
+  assertNoDuplicateKeys(body);
   return validateProviderResponseEnvelope(parsed);
 }
 
