@@ -180,9 +180,38 @@ test("WA-P1A.2 review (native, no UI): a deliberately unresponsive worker is kil
   }
 });
 
+test("WA-P1A.2 review (native, pure): a SECRET element persists no name, AutomationId or ClassName, and its fingerprint is built only from the redacted record", { skip: PURE_SKIP }, async () => {
+  const token = `WA_P1A2_SECRET_CLASS_${randomBytes(6).toString("hex")}`;
+  const idToken = `wa-p1a2-secret-automation-${randomBytes(6).toString("hex")}`;
+  const nameToken = `wa-p1a2-secret-name-${randomBytes(6).toString("hex")}`;
+  const observed = { name: nameToken, automationId: idToken, className: token, controlType: "ControlType.Edit", processId: 4242, enabled: true, offscreen: false, keyboardFocusable: true, bounds: { left: 10, top: 20, width: 200, height: 24 } };
+  const cases = [
+    { policy: { inputSecurity: "SECRET_OR_PASSWORD", nameRecorded: true }, observed },
+    { policy: { inputSecurity: "UNKNOWN", nameRecorded: false }, observed },
+    { policy: { inputSecurity: "UNKNOWN", nameRecorded: true }, observed: { ...observed, controlType: "ControlType.Text" } },
+  ];
+  const got = await dotSource(cases, "$p = Element-PersistedRecord $c.policy $c.observed; @{ record = $p.record; fingerprint = $p.fingerprint; sha = $p.evidenceSha256 }") as { record: Record<string, unknown>; fingerprint: string; sha: string }[];
+  const [secret, unknownUnnamed, named] = got as [typeof got[0], typeof got[0], typeof got[0]];
+  for (const value of [token, idToken, nameToken]) {
+    assert.equal(JSON.stringify(secret.record).includes(value), false, "secret record discloses nothing free-form");
+    assert.equal(secret.fingerprint.includes(value), false, "secret fingerprint input discloses nothing free-form");
+  }
+  assert.equal(secret.record.className, null);
+  assert.equal(secret.record.classNameRedacted, true);
+  assert.equal(secret.record.automationId, null);
+  assert.equal(secret.record.name, null);
+  assert.equal(secret.sha, sha256(secret.fingerprint), "the evidence SHA is exactly the hash of the redacted fingerprint");
+  // Non-sensitive identifiers stay observable (bounded plain identifiers only).
+  assert.equal(unknownUnnamed.record.className, token);
+  assert.equal(unknownUnnamed.record.automationId, idToken);
+  assert.equal(unknownUnnamed.record.name, null);
+  assert.equal(named.record.name, nameToken);
+  assert.notEqual(secret.sha, unknownUnnamed.sha);
+});
+
 // ------------------------------------------------------------------ live (operator opt-in)
 
-type Ready = { pid: number; hwnd: number; bounds: ReturnType<typeof D>; primary: ReturnType<typeof D> };
+type Ready = { pid: number; hwnd: number; bounds: ReturnType<typeof D>; primary: ReturnType<typeof D>; secretBounds: ReturnType<typeof D>; ordinaryBounds: ReturnType<typeof D>; secretClassName: string };
 let fixture: { child: ReturnType<typeof spawn>; ready: Ready; closeFile: string; nonce: string } | null = null;
 let workRoot = "";
 const adapters = new Map<string, WindowsDesktopObservationAdapter>();
@@ -275,6 +304,20 @@ test("WA-P1A.2 F1+F2 (native, live): exact-window snapshot keeps input values ou
   assert.equal(text.includes(ordinary), false, "input values are not recorded either");
   assert.equal(JSON.stringify(result).includes(secret), false, "nor the adapter result");
   assert.ok((result.elements ?? []).some((e) => e.inputSecurity === "SECRET_OR_PASSWORD"), "the password field is classified SECRET_OR_PASSWORD");
+  // The SECRET element (bound by fixture geometry) persists no class/automation identifiers,
+  // while the ordinary box of the same Win32 class keeps its plain identifiers.
+  const at = (r: { left: number; top: number; right: number; bottom: number }) => (e: { bounds: { left: number; top: number; width: number; height: number } }) =>
+    Math.round(e.bounds.left) === r.left && Math.round(e.bounds.top) === r.top && Math.round(e.bounds.left + e.bounds.width) === r.right && Math.round(e.bounds.top + e.bounds.height) === r.bottom;
+  const all = (JSON.parse(text.replace(/^\uFEFF/, "")) as { elements: unknown }).elements;
+  const list = (Array.isArray(all) ? all : [all]) as { className: string | null; automationId: string | null; bounds: { left: number; top: number; width: number; height: number } }[];
+  const secretRecords = list.filter(at(f.ready.secretBounds));
+  const ordinaryRecords = list.filter(at(f.ready.ordinaryBounds));
+  assert.equal(secretRecords.length, 1, "exactly one record bound to the password box");
+  assert.equal(ordinaryRecords.length, 1, "exactly one record bound to the ordinary box");
+  assert.equal(secretRecords[0]!.className, null, "no ClassName for the SECRET element");
+  assert.equal(secretRecords[0]!.automationId, null, "no AutomationId for the SECRET element");
+  assert.equal(text.includes(f.ready.secretClassName) && ordinaryRecords[0]!.className !== f.ready.secretClassName, false, "the real class string appears only via the non-secret box");
+  assert.equal(ordinaryRecords[0]!.className, f.ready.secretClassName, "the same Win32 class stays observable on the non-secret element");
   const parsed = JSON.parse(text.replace(/^﻿/, "")) as { elements: { name: string | null; bounds: { left: number; top: number; width: number; height: number } }[] | { name: string | null } };
   const els = (Array.isArray(parsed.elements) ? parsed.elements : [parsed.elements]) as { name: string | null; bounds: { left: number; top: number; width: number; height: number } }[];
   const names = new Set(els.map((e) => e.name));

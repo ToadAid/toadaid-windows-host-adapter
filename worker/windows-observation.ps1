@@ -432,6 +432,46 @@ function Safe-Identifier([string]$Value, [bool]$Sensitive, [int]$MaxLength) {
   return $Value
 }
 
+# WA-P1A.2 review (PR #3 change request): the persisted element record and its
+# fingerprint are built in ONE pure function, so every free-form identifier
+# (name, AutomationId, ClassName) follows the same rule: never persisted for a
+# SECRET_OR_PASSWORD element, and only as a short plain identifier otherwise.
+# The fingerprint is computed from exactly the persisted fields (ordered keys).
+function Element-PersistedRecord([object]$Policy, [object]$Observed) {
+  $secret = $Policy.inputSecurity -eq "SECRET_OR_PASSWORD"
+  $name = $null
+  if ($Policy.nameRecorded -and -not $secret -and $null -ne $Observed.name) {
+    $name = [string]$Observed.name
+    if ($name.Length -gt 256) {
+      $name = $name.Substring(0, 256)
+    }
+  }
+  $automationId = Safe-Identifier ([string]$Observed.automationId) $secret 128
+  $className = Safe-Identifier ([string]$Observed.className) $secret 128
+  $b = $Observed.bounds
+  $record = [ordered]@{
+    name = $name
+    nameRedacted = ($null -eq $name)
+    automationId = $automationId
+    automationIdRedacted = ($null -eq $automationId)
+    className = $className
+    classNameRedacted = ($null -eq $className)
+    controlType = [string]$Observed.controlType
+    processId = [int]$Observed.processId
+    enabled = [bool]$Observed.enabled
+    offscreen = [bool]$Observed.offscreen
+    keyboardFocusable = [bool]$Observed.keyboardFocusable
+    bounds = [ordered]@{
+      left = [double]$b.left
+      top = [double]$b.top
+      width = [double]$b.width
+      height = [double]$b.height
+    }
+  }
+  $fingerprint = $record | ConvertTo-Json -Depth 8 -Compress
+  return @{ record = $record; fingerprint = $fingerprint; evidenceSha256 = (Sha256-Text $fingerprint) }
+}
+
 function Element-TextFacts([System.Windows.Automation.AutomationElement]$Element) {
   $facts = @{ controlType = ""; className = ""; isPassword = $false; valuePattern = $false; textPattern = $false; nativeWindowHandle = 0; win32Style = 0; win32StyleKnown = $false; factsIncomplete = $false }
   try {
@@ -568,27 +608,12 @@ function Ui-Snapshot(
     if ($recordElement) {
       try {
         $policy = Text-PolicyFor (Element-TextFacts $element)
-        $name = $null
-        if ($policy.nameRecorded) {
-          $name = [string]$element.Current.Name
-          if ($name.Length -gt 256) {
-            $name = $name.Substring(0, 256)
-          }
-        }
-        $secretElement = $policy.inputSecurity -eq "SECRET_OR_PASSWORD"
-        $automationId = Safe-Identifier ([string]$element.Current.AutomationId) $secretElement 128
-        $className = Safe-Identifier ([string]$element.Current.ClassName) $false 128
-        $controlType = [string]$element.Current.ControlType.ProgrammaticName
-        $processId = [int]$element.Current.ProcessId
-
-        $record = @{
-          name = $name
-          nameRedacted = (-not $policy.nameRecorded)
-          automationId = $automationId
-          automationIdRedacted = ($null -eq $automationId)
-          className = $className
-          controlType = $controlType
-          processId = $processId
+        $observed = @{
+          name = $null
+          automationId = [string]$element.Current.AutomationId
+          className = [string]$element.Current.ClassName
+          controlType = [string]$element.Current.ControlType.ProgrammaticName
+          processId = [int]$element.Current.ProcessId
           enabled = [bool]$element.Current.IsEnabled
           offscreen = [bool]$element.Current.IsOffscreen
           keyboardFocusable = [bool]$element.Current.IsKeyboardFocusable
@@ -599,9 +624,13 @@ function Ui-Snapshot(
             height = [double]$rect.Height
           }
         }
-
-        $fingerprint = $record | ConvertTo-Json -Depth 8 -Compress
-        $evidenceSha = Sha256-Text $fingerprint
+        # The name is read from UIA only when the policy allows recording it.
+        if ($policy.nameRecorded) {
+          $observed.name = [string]$element.Current.Name
+        }
+        $persisted = Element-PersistedRecord $policy $observed
+        $record = $persisted.record
+        $evidenceSha = $persisted.evidenceSha256
         $elementId = "uia-$($evidenceSha.Substring(0, 32))"
         $record.elementId = $elementId
         $tree += $record

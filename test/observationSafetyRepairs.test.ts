@@ -147,7 +147,10 @@ test("WA-P1A.2 source guards: region coverage, window containment, name redactio
     "$windowScopeRects",
     "Rect-ContainedByAny $rect $windowScopeRects",
     "function Text-PolicyFor",
-    "nameRedacted = (-not $policy.nameRecorded)",
+    "function Element-PersistedRecord",
+    "$persisted = Element-PersistedRecord $policy $observed",
+    "$className = Safe-Identifier ([string]$Observed.className) $secret 128",
+    "$automationId = Safe-Identifier ([string]$Observed.automationId) $secret 128",
     "if ($policy.nameRecorded) {",
     "(Text-PolicyFor (Element-TextFacts $candidate)).nameRecorded",
     "wait deadline exhausted before the first check",
@@ -159,9 +162,12 @@ test("WA-P1A.2 source guards: region coverage, window containment, name redactio
   ]) {
     assert.equal(source.includes(required), true, required);
   }
-  // The element fingerprint must be computed from the redacted record.
-  const nameAt = source.indexOf("if ($policy.nameRecorded) {");
+  // The fingerprint is computed inside the pure record builder, from the
+  // persisted (redacted) record only; no other fingerprint of raw fields exists.
+  const builderAt = source.indexOf("function Element-PersistedRecord");
   const fingerprintAt = source.indexOf("$fingerprint = $record | ConvertTo-Json");
-  assert.ok(nameAt > 0 && fingerprintAt > nameAt, "fingerprint after redaction");
+  assert.ok(builderAt > 0 && fingerprintAt > builderAt, "fingerprint inside the record builder");
+  assert.equal(source.split("$fingerprint = ").length - 1, 1, "exactly one element fingerprint site");
+  assert.equal(source.includes("ClassName) $false 128"), false, "ClassName is never persisted regardless of secrecy");
   assert.equal(source.includes("$found = $window.FindFirst("), false, "text_exists must not accept the first name match unconditionally");
 });

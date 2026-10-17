@@ -7,6 +7,18 @@ param(
 )
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+namespace WaP1a2Fixture {
+  public static class N {
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern int GetClassName(IntPtr hWnd, StringBuilder name, int max);
+    public static string ClassOf(IntPtr h) { var sb = new StringBuilder(256); GetClassName(h, sb, sb.Capacity); return sb.ToString(); }
+  }
+}
+"@
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
@@ -54,6 +66,9 @@ $form.Add_Shown({
     pid = $p.Id
     hwnd = [int64]$form.Handle
     bounds = @{ left = $form.Bounds.Left; top = $form.Bounds.Top; right = $form.Bounds.Right; bottom = $form.Bounds.Bottom }
+    secretBounds = (& { $r = $form.RectangleToScreen($secret.Bounds); @{ left = $r.Left; top = $r.Top; right = $r.Right; bottom = $r.Bottom } })
+    ordinaryBounds = (& { $r = $form.RectangleToScreen($ordinary.Bounds); @{ left = $r.Left; top = $r.Top; right = $r.Right; bottom = $r.Bottom } })
+    secretClassName = [WaP1a2Fixture.N]::ClassOf($secret.Handle)
     primary = @{ left = $screen.Bounds.Left; top = $screen.Bounds.Top; right = $screen.Bounds.Right; bottom = $screen.Bounds.Bottom }
   } | ConvertTo-Json -Compress))
   [Console]::Out.Flush()
