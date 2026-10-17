@@ -43,6 +43,16 @@ test("WA-P1A.1 native skeleton mirrors strict one-line protocol law without muta
     );
   }
 
+  // WA-NATIVE-NET10-P1: the skeleton targets the .NET 10 LTS line with
+  // warnings as errors; nothing else in the project changes.
+  const project = await readFile(
+    resolve(process.cwd(), "native", "ToadAid.WindowsWorker", "ToadAid.WindowsWorker.csproj"),
+    "utf8",
+  );
+  assert.match(project, /<TargetFramework>net10\.0<\/TargetFramework>/);
+  assert.match(project, /<TreatWarningsAsErrors>true<\/TreatWarningsAsErrors>/);
+  assert.equal(/PackageReference/.test(project), false, "no package references");
+
   // LF-only framing: responses must never go through WriteLine (CRLF on Windows).
   assert.equal(source.includes("Console.Out.WriteLine"), false, "Console.Out.WriteLine");
   assert.equal(source.includes("Console.In.ReadLine"), false, "Console.In.ReadLine");
