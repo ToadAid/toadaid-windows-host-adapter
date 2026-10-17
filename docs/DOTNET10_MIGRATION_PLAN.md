@@ -58,5 +58,8 @@ or enabling the native worker as the observation path (WA-P1D).
 - The `System.Text.Json` behaviours the strict parser depends on are pinned by
   the interop vectors (duplicate keys incl. escaped/nested, depth, invalid
   UTF-8, BOM, framing), which must pass identically on the .NET 10 build.
-- CI: the Windows SDK-10 build/test job is **not added** in this cut because
-  the CI workflow (#4) is not in this branch; it is a follow-up once both land.
+- CI: after #4 landed, this cut adds the `native C# skeleton (.NET 10,
+  windows-2022)` job to `.github/workflows/ci.yml`: .NET SDK 10.0.402 via
+  pinned `actions/setup-dotnet` v6.0.0, a .NET 10 build with warnings as
+  errors, a `net10.0` runtimeconfig check, and the strict interop + source
+  tests against the built executable, failing on any skip. See `docs/CI.md`.
