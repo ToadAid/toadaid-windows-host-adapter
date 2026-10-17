@@ -3,9 +3,22 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 
+// WA native worker SKELETON (protocol v1): HANDSHAKE / HEALTH only. OBSERVE is
+// UNIMPLEMENTED_KIND. No observation, no mutation, no host service.
+//
+// Framing law (same as the strict Node decoder): exactly one UTF-8 JSON object
+// followed by exactly one LF byte; no CR, no BOM, at most 256 KiB. Responses
+// are written as raw UTF-8 bytes + "\n" (never Console.WriteLine, which emits
+// CRLF on Windows). Payloads are validated strictly and recursively.
+
 const string ProtocolVersion =
     "toadaid.windows-provider-worker.v1";
 const int MaxFrameBytes = 256 * 1024;
+const int MaxPayloadDepth = 8;
+const int MaxStringLength = 65_536;
+const int MaxArrayLength = 4_096;
+const int MaxObjectKeys = 512;
+const int MaxKeyLength = 128;
 
 static string Sha256(string value)
 {
@@ -53,7 +66,7 @@ static void RequireExactTopLevelFields(
         if (!missing.Remove(property.Name))
         {
             throw new InvalidOperationException(
-                "request contains unknown field");
+                "request contains unknown or duplicate field");
         }
     }
 
@@ -61,6 +74,84 @@ static void RequireExactTopLevelFields(
     {
         throw new InvalidOperationException(
             "request contains missing field");
+    }
+}
+
+// Mirrors the Node normalizer: bounded depth, sizes and keys; duplicate keys
+// are compared after JSON unescaping (JsonProperty.Name is unescaped);
+// "__proto__" and NUL-bearing or empty keys are refused.
+static void RequireStrictPayload(
+    JsonElement value,
+    int depth)
+{
+    if (depth > MaxPayloadDepth)
+    {
+        throw new InvalidOperationException(
+            "payload nesting is too deep");
+    }
+
+    switch (value.ValueKind)
+    {
+        case JsonValueKind.Object:
+            HashSet<string> keys =
+                new(StringComparer.Ordinal);
+            foreach (
+                JsonProperty property
+                in value.EnumerateObject())
+            {
+                string key = property.Name;
+                if (
+                    key.Length < 1 ||
+                    key.Length > MaxKeyLength ||
+                    key.Contains('\0') ||
+                    key == "__proto__")
+                {
+                    throw new InvalidOperationException(
+                        "payload key is invalid");
+                }
+                if (!keys.Add(key))
+                {
+                    throw new InvalidOperationException(
+                        "payload contains a duplicate key");
+                }
+                if (keys.Count > MaxObjectKeys)
+                {
+                    throw new InvalidOperationException(
+                        "payload object has too many keys");
+                }
+                RequireStrictPayload(
+                    property.Value,
+                    depth + 1);
+            }
+            break;
+        case JsonValueKind.Array:
+            int length = 0;
+            foreach (
+                JsonElement item
+                in value.EnumerateArray())
+            {
+                length += 1;
+                if (length > MaxArrayLength)
+                {
+                    throw new InvalidOperationException(
+                        "payload array is too large");
+                }
+                RequireStrictPayload(
+                    item,
+                    depth + 1);
+            }
+            break;
+        case JsonValueKind.String:
+            if (
+                (value.GetString() ?? "").Length >
+                MaxStringLength)
+            {
+                throw new InvalidOperationException(
+                    "payload string is too large");
+            }
+            break;
+        default:
+            break;
     }
 }
 
@@ -91,61 +182,116 @@ static void WriteResponse(
         error,
     };
 
-    Console.Out.WriteLine(
-        JsonSerializer.Serialize(response));
+    byte[] bytes =
+        Encoding.UTF8.GetBytes(
+            JsonSerializer.Serialize(response) + "\n");
+    using Stream stdout =
+        Console.OpenStandardOutput();
+    stdout.Write(bytes, 0, bytes.Length);
+    stdout.Flush();
 }
 
-string? line = Console.In.ReadLine();
-if (line is null)
+static int Refuse(
+    string code,
+    string message)
 {
     WriteResponse(
         "startup",
         "generation-unset",
         "ERROR",
         null,
+        code,
+        message);
+    return 2;
+}
+
+// Read the whole one-shot frame as raw bytes, bounded (never decoded by the
+// console code page and never via ReadLine, which hides CR/LF details).
+byte[] frame;
+using (Stream stdin = Console.OpenStandardInput())
+using (MemoryStream buffer = new())
+{
+    byte[] chunk = new byte[16 * 1024];
+    int read;
+    while (
+        (read = stdin.Read(chunk, 0, chunk.Length)) > 0)
+    {
+        buffer.Write(chunk, 0, read);
+        if (buffer.Length > MaxFrameBytes)
+        {
+            break;
+        }
+    }
+    frame = buffer.ToArray();
+}
+
+if (frame.Length == 0)
+{
+    return Refuse(
         "FRAME_MISSING",
         "worker request frame missing");
-    return 2;
 }
 
-if (Console.In.Peek() != -1)
+if (frame.Length > MaxFrameBytes)
 {
-    WriteResponse(
-        "startup",
-        "generation-unset",
-        "ERROR",
-        null,
-        "FRAME_MULTILINE",
-        "worker accepts exactly one JSON line");
-    return 2;
-}
-
-if (
-    line.Contains('\r') ||
-    line.Contains('\n'))
-{
-    WriteResponse(
-        "startup",
-        "generation-unset",
-        "ERROR",
-        null,
-        "FRAME_MULTILINE",
-        "worker accepts exactly one JSON line");
-    return 2;
-}
-
-if (
-    Encoding.UTF8.GetByteCount(line) + 1 >
-    MaxFrameBytes)
-{
-    WriteResponse(
-        "startup",
-        "generation-unset",
-        "ERROR",
-        null,
+    return Refuse(
         "FRAME_TOO_LARGE",
         "worker request frame too large");
-    return 2;
+}
+
+if (
+    frame.Length >= 3 &&
+    frame[0] == 0xEF &&
+    frame[1] == 0xBB &&
+    frame[2] == 0xBF)
+{
+    return Refuse(
+        "FRAME_ENCODING_INVALID",
+        "worker request frame must not start with a BOM");
+}
+
+int lineFeeds = 0;
+bool carriageReturn = false;
+foreach (byte b in frame)
+{
+    if (b == (byte)'\n')
+    {
+        lineFeeds += 1;
+    }
+    else if (b == (byte)'\r')
+    {
+        carriageReturn = true;
+    }
+}
+
+if (frame[^1] != (byte)'\n')
+{
+    return Refuse(
+        "FRAME_UNTERMINATED",
+        "worker request frame must end with one LF");
+}
+
+if (
+    lineFeeds != 1 ||
+    carriageReturn)
+{
+    return Refuse(
+        "FRAME_MULTILINE",
+        "worker accepts exactly one JSON line");
+}
+
+string line;
+try
+{
+    line =
+        new UTF8Encoding(false, true)
+        .GetString(frame, 0, frame.Length - 1);
+}
+catch (DecoderFallbackException)
+{
+    return Refuse(
+        "FRAME_ENCODING_INVALID",
+        "worker request frame is not valid UTF-8");
 }
 
 string requestId = "request-unparsed";
@@ -154,7 +300,14 @@ string generationId = "generation-unset";
 try
 {
     using JsonDocument document =
-        JsonDocument.Parse(line);
+        JsonDocument.Parse(
+            line,
+            new JsonDocumentOptions
+            {
+                AllowTrailingCommas = false,
+                CommentHandling = JsonCommentHandling.Disallow,
+                MaxDepth = MaxPayloadDepth + 2,
+            });
     JsonElement root =
         document.RootElement;
 
@@ -220,7 +373,9 @@ try
         return 2;
     }
 
-    _ = root.GetProperty("payload");
+    RequireStrictPayload(
+        root.GetProperty("payload"),
+        0);
 
     if (!OperatingSystem.IsWindows())
     {
@@ -270,8 +425,8 @@ try
 catch (Exception error)
 {
     WriteResponse(
-        requestId,
-        generationId,
+        ValidId(requestId) ? requestId : "request-invalid",
+        ValidId(generationId) ? generationId : "generation-invalid",
         "ERROR",
         null,
         "MALFORMED_REQUEST",
