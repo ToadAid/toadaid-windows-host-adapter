@@ -62,8 +62,17 @@ namespace ToadAid {
   public static class User32 {
     [DllImport("user32.dll")]
     public static extern IntPtr GetForegroundWindow();
-    [DllImport("user32.dll", EntryPoint = "GetWindowLongW")]
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongW", SetLastError = true)]
     public static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+    [DllImport("kernel32.dll")]
+    public static extern void SetLastError(uint code);
+    // WA-P1A.2 review: a style of 0 is ambiguous (failure, or a window with no
+    // style bits). Only a non-zero read counts as a verified style.
+    public static bool TryGetStyle(IntPtr hWnd, out int style) {
+      SetLastError(0);
+      style = GetWindowLong(hWnd, -16);
+      return style != 0;
+    }
   }
 }
 "@
@@ -387,8 +396,13 @@ function Text-PolicyFor([object]$Facts) {
   $class = [string]$Facts.className
   $editClass = $class -match '(?i)(edit|richedit|textbox|password|passwordbox)'
   $editType = @("ControlType.Edit", "ControlType.Document", "ControlType.ComboBox") -contains $type
-  $esPassword = $editClass -and (([int64]$Facts.win32Style -band 0x20) -ne 0)
-  $sensitive = [bool]$Facts.isPassword -or $esPassword -or ($class -match '(?i)password') -or [bool]$Facts.factsIncomplete
+  # A Win32 style counts only when it was read from a real handle and is non-zero.
+  $styleVerified = [bool]$Facts.win32StyleKnown -and [int64]$Facts.nativeWindowHandle -ne 0 -and [int64]$Facts.win32Style -ne 0
+  $esPassword = $editClass -and $styleVerified -and (([int64]$Facts.win32Style -band 0x20) -ne 0)
+  # An edit-like class whose password style cannot be verified is treated as a
+  # password field: the absence of ES_PASSWORD is never assumed.
+  $editStyleUnverified = $editClass -and -not $styleVerified
+  $sensitive = [bool]$Facts.isPassword -or $esPassword -or $editStyleUnverified -or ($class -match '(?i)password') -or [bool]$Facts.factsIncomplete
   $inputLike = $editType -or $editClass -or [bool]$Facts.valuePattern -or [bool]$Facts.textPattern
   $safeWin32Class = $class -match '^(?i:Static|Button|#32770)$' -or $class -match '^WindowsForms10\.(?i:STATIC|BUTTON|Window)\.'
   $nameSafe = (-not $sensitive) -and (-not $inputLike) -and (
@@ -397,14 +411,25 @@ function Text-PolicyFor([object]$Facts) {
   )
   if ($sensitive) {
     $security = "SECRET_OR_PASSWORD"
-  } elseif ($type -eq "ControlType.Edit" -and [bool]$Facts.valuePattern -and -not $editClass -and [int64]$Facts.nativeWindowHandle -eq 0) {
-    $security = "ORDINARY_TEXT"
-  } elseif ($type -eq "ControlType.Edit" -and [bool]$Facts.valuePattern -and $editClass -and -not $esPassword -and [bool]$Facts.win32StyleKnown) {
+  } elseif ($type -eq "ControlType.Edit" -and [bool]$Facts.valuePattern -and $editClass -and $styleVerified -and -not $esPassword) {
+    # ORDINARY_TEXT needs positive, mutually consistent evidence: a UIA Edit with
+    # a value pattern, an edit Win32 class and a verified non-password style.
+    # ValuePattern alone (e.g. a windowless Edit) is not enough.
     $security = "ORDINARY_TEXT"
   } else {
     $security = "UNKNOWN"
   }
   return @{ inputSecurity = $security; nameRecorded = [bool]$nameSafe }
+}
+
+# WA-P1A.2 review: free-form UIA identifiers are persisted only when they are
+# short, plain identifiers; anything else (or anything from a sensitive
+# element) is withheld rather than stored. Pure; unit-tested.
+function Safe-Identifier([string]$Value, [bool]$Sensitive, [int]$MaxLength) {
+  if ($Sensitive -or [string]::IsNullOrEmpty($Value)) { return $null }
+  if ($Value.Length -gt $MaxLength) { return $null }
+  if ($Value -notmatch '^[A-Za-z0-9_.:#$-]+$') { return $null }
+  return $Value
 }
 
 function Element-TextFacts([System.Windows.Automation.AutomationElement]$Element) {
@@ -422,8 +447,9 @@ function Element-TextFacts([System.Windows.Automation.AutomationElement]$Element
   if ($facts.nativeWindowHandle -ne 0) {
     try {
       Add-User32
-      $facts.win32Style = [int64][ToadAid.User32]::GetWindowLong([IntPtr]::new($facts.nativeWindowHandle), -16)
-      $facts.win32StyleKnown = $true
+      $style = 0
+      $facts.win32StyleKnown = [ToadAid.User32]::TryGetStyle([IntPtr]::new($facts.nativeWindowHandle), [ref]$style)
+      $facts.win32Style = [int64]$style
     } catch {
       $facts.factsIncomplete = $true
     }
@@ -549,14 +575,9 @@ function Ui-Snapshot(
             $name = $name.Substring(0, 256)
           }
         }
-        $automationId = [string]$element.Current.AutomationId
-        if ($automationId.Length -gt 256) {
-          $automationId = $automationId.Substring(0, 256)
-        }
-        $className = [string]$element.Current.ClassName
-        if ($className.Length -gt 128) {
-          $className = $className.Substring(0, 128)
-        }
+        $secretElement = $policy.inputSecurity -eq "SECRET_OR_PASSWORD"
+        $automationId = Safe-Identifier ([string]$element.Current.AutomationId) $secretElement 128
+        $className = Safe-Identifier ([string]$element.Current.ClassName) $false 128
         $controlType = [string]$element.Current.ControlType.ProgrammaticName
         $processId = [int]$element.Current.ProcessId
 
@@ -564,6 +585,7 @@ function Ui-Snapshot(
           name = $name
           nameRedacted = (-not $policy.nameRecorded)
           automationId = $automationId
+          automationIdRedacted = ($null -eq $automationId)
           className = $className
           controlType = $controlType
           processId = $processId
@@ -696,16 +718,24 @@ function Wait-For(
   $token = Artifact-Token $Epoch
   # WA-P1A.2 F3: finish before the adapter's outer wall clock so an absent
   # match can be reported as matched=false; never run past the outer deadline.
-  $deadline = [DateTime]::UtcNow.AddMilliseconds([int]$Parameters.timeoutMs)
-  if ($null -ne $WorkerDeadlineUtc -and $WorkerDeadlineUtc -lt $deadline) {
+  $requestedEnd = [DateTime]::UtcNow.AddMilliseconds([int]$Parameters.timeoutMs)
+  $deadline = $requestedEnd
+  $budgetBound = $false
+  if ($null -ne $WorkerDeadlineUtc -and $WorkerDeadlineUtc -lt $requestedEnd) {
     $deadline = $WorkerDeadlineUtc
+    $budgetBound = $true
   }
   if ([DateTime]::UtcNow -ge $deadline) {
     throw "wait deadline exhausted before the first check"
   }
   $matched = $false
+  $checks = 0
+  $firstCheck = $null
+  $lastCheck = $null
 
   while ($true) {
+    if ($null -eq $firstCheck) { $firstCheck = [DateTime]::UtcNow }
+    $checks += 1
     $window = [System.Windows.Automation.AutomationElement]::FromHandle($hwnd)
     if ($null -ne $window) {
       switch ([string]$Parameters.condition) {
@@ -743,6 +773,7 @@ function Wait-For(
       }
     }
 
+    $lastCheck = [DateTime]::UtcNow
     if ($matched) {
       break
     }
@@ -757,11 +788,25 @@ function Wait-For(
     }
   }
 
+  # WA-P1A.2 review: matched=false only means "not observed during the interval
+  # actually checked". The evidence states why the wait ended and how long was
+  # really observed, so a budget-truncated wait never reads as the full request.
+  if ($matched) {
+    $reason = "MATCHED"
+  } elseif ($budgetBound) {
+    $reason = "WORKER_BUDGET_REACHED"
+  } else {
+    $reason = "REQUEST_TIMEOUT_ELAPSED"
+  }
   $id = "wait-result-$token-0"
   $artifact = Write-Utf8JsonArtifact $ArtifactRoot $id @{
     windowId = $Parameters.windowId
     condition = $Parameters.condition
     matched = $matched
+    reason = $reason
+    requestedTimeoutMs = [int]$Parameters.timeoutMs
+    observedIntervalMs = [int][Math]::Round(($lastCheck - $firstCheck).TotalMilliseconds)
+    checks = $checks
   } "WAIT_RESULT"
 
   return @{

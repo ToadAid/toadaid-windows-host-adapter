@@ -20,6 +20,7 @@ import type {
 } from "@toadaid/agent-capabilities";
 
 import {
+  createPowerShellWindowsObservationWorker,
   createWindowsDesktopObservationAdapter,
   defaultWindowsPowerShellPath,
 } from "../src/windowsObservationAdapter.js";
@@ -108,8 +109,15 @@ test("WA-P1A.2 F1 (native, pure): names are recorded only for positively non-inp
     { name: "WinForms label", f: { ...base, controlType: "ControlType.Pane", className: "WindowsForms10.STATIC.app.0.141b42a_r6_ad1", nativeWindowHandle: 4244, win32Style: 0x50000000, win32StyleKnown: true }, security: "UNKNOWN", named: true },
     { name: "Win32 password Edit", f: { ...base, controlType: "ControlType.Edit", className: "Edit", valuePattern: true, nativeWindowHandle: 4245, win32Style: 0x50010020, win32StyleKnown: true }, security: "SECRET_OR_PASSWORD", named: false },
     { name: "Win32 ordinary Edit", f: { ...base, controlType: "ControlType.Edit", className: "Edit", valuePattern: true, nativeWindowHandle: 4246, win32Style: 0x50010000, win32StyleKnown: true }, security: "ORDINARY_TEXT", named: false },
-    { name: "windowless UIA Edit", f: { ...base, controlType: "ControlType.Edit", className: "TextBox", valuePattern: true }, security: "UNKNOWN", named: false },
-    { name: "windowless UIA Edit without edit-like class", f: { ...base, controlType: "ControlType.Edit", className: "", valuePattern: true }, security: "ORDINARY_TEXT", named: false },
+    // WA-P1A.2 review: uncertain edit evidence fails closed.
+    { name: "windowless UIA Edit with an edit-like class (style unverifiable)", f: { ...base, controlType: "ControlType.Edit", className: "TextBox", valuePattern: true }, security: "SECRET_OR_PASSWORD", named: false },
+    { name: "windowless UIA Edit, no class, ValuePattern only", f: { ...base, controlType: "ControlType.Edit", className: "", valuePattern: true }, security: "UNKNOWN", named: false },
+    { name: "Win32 Edit whose style read failed", f: { ...base, controlType: "ControlType.Edit", className: "Edit", valuePattern: true, nativeWindowHandle: 4247, win32Style: 0, win32StyleKnown: false }, security: "SECRET_OR_PASSWORD", named: false },
+    { name: "Win32 Edit reporting style 0 as known", f: { ...base, controlType: "ControlType.Edit", className: "Edit", valuePattern: true, nativeWindowHandle: 4248, win32Style: 0, win32StyleKnown: true }, security: "SECRET_OR_PASSWORD", named: false },
+    { name: "Win32 Edit style claimed known without a handle", f: { ...base, controlType: "ControlType.Edit", className: "Edit", valuePattern: true, nativeWindowHandle: 0, win32Style: 0x50010000, win32StyleKnown: true }, security: "SECRET_OR_PASSWORD", named: false },
+    { name: "inconsistent UIA: Text type with an Edit class, style unverified", f: { ...base, controlType: "ControlType.Text", className: "Edit", nativeWindowHandle: 4249, win32Style: 0, win32StyleKnown: false }, security: "SECRET_OR_PASSWORD", named: false },
+    { name: "inconsistent UIA: Text type with an Edit class, verified non-password style", f: { ...base, controlType: "ControlType.Text", className: "Edit", nativeWindowHandle: 4250, win32Style: 0x50010000, win32StyleKnown: true }, security: "UNKNOWN", named: false },
+    { name: "Win32 Edit without a value pattern", f: { ...base, controlType: "ControlType.Edit", className: "Edit", nativeWindowHandle: 4251, win32Style: 0x50010000, win32StyleKnown: true }, security: "UNKNOWN", named: false },
     { name: "UIA IsPassword", f: { ...base, controlType: "ControlType.Edit", className: "PasswordBox", isPassword: true, valuePattern: true }, security: "SECRET_OR_PASSWORD", named: false },
     { name: "plain Text", f: { ...base, controlType: "ControlType.Text", className: "" }, security: "UNKNOWN", named: true },
     { name: "Button", f: { ...base, controlType: "ControlType.Button", className: "Button" }, security: "UNKNOWN", named: true },
@@ -125,6 +133,51 @@ test("WA-P1A.2 F1 (native, pure): names are recorded only for positively non-inp
     assert.equal(got[i]?.security, c.security, `${c.name}: inputSecurity`);
     assert.equal(got[i]?.named, c.named, `${c.name}: nameRecorded`);
   });
+});
+
+test("WA-P1A.2 review (native, pure): free-form identifiers are persisted only as short plain identifiers, never for secret elements", { skip: PURE_SKIP }, async () => {
+  const cases = [
+    { v: "wa-p1a2-secret", sensitive: false, expect: "wa-p1a2-secret" },
+    { v: "WindowsForms10.EDIT.app.0.141b42a_r6_ad1", sensitive: false, expect: "WindowsForms10.EDIT.app.0.141b42a_r6_ad1" },
+    { v: "123456", sensitive: true, expect: null },
+    { v: "Value: hunter2", sensitive: false, expect: null },
+    { v: "a".repeat(129), sensitive: false, expect: null },
+    { v: "", sensitive: false, expect: null },
+    { v: "line\nbreak", sensitive: false, expect: null },
+  ];
+  const got = await dotSource(cases, "Safe-Identifier ([string]$c.v) ([bool]$c.sensitive) 128");
+  cases.forEach((c, i) => assert.equal(got[i] ?? null, c.expect, `Safe-Identifier(${JSON.stringify(c.v).slice(0, 40)})`));
+});
+
+test("WA-P1A.2 review (native, no UI): a deliberately unresponsive worker is killed by the outer watchdog and leaves no process", { skip: PURE_SKIP }, async () => {
+  const marker = randomBytes(8).toString("hex");
+  const dir = await mkdtemp(join(tmpdir(), "wa-p1a2-stall-"));
+  try {
+    const stall = join(dir, `stalled-worker-${marker}.ps1`);
+    await writeFile(stall, "Start-Sleep -Seconds 120\n", "utf8");
+    const worker = createPowerShellWindowsObservationWorker(defaultWindowsPowerShellPath(), stall);
+    const request = {
+      schemaVersion: "toadaid.desktop-observation-adapter-request.v1",
+      invocationId: "stall-1", runId: "stall", hostId: "h", sessionId: "s", ownerId: "o",
+      capabilityId: "host:display-inventory", toolName: "desktop.display-inventory",
+      observationEpoch: "stall-epoch", parametersSha256: "7".repeat(64), maxWallClockMs: 1_500,
+      parameters: normalizeDesktopObservationRequest({ kind: "DISPLAY_INVENTORY", hostId: "h", sessionId: "s", ownerId: "o", maxWallClockMs: 1_500 }),
+    } as DesktopObservationAdapterRequest;
+    const started = Date.now();
+    await assert.rejects(worker.run(request, join(dir, "artifacts"), Date.now() + 1_000), /timed out/);
+    assert.ok(Date.now() - started < 1_500 + 3_000, "killed within the wall clock plus slack");
+    const probe = join(dir, "probe.ps1");
+    await writeFile(probe, `$p = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" | Where-Object { $_.CommandLine -like '*stalled-worker-${marker}*' }); [Console]::Out.Write($p.Count)`, "utf8");
+    let alive = -1;
+    for (let i = 0; i < 10; i += 1) {
+      alive = Number(await runPowerShellFile(probe, [], CHILD_TIMEOUT_MS));
+      if (alive === 0) break;
+      await new Promise((r) => setTimeout(r, 300));
+    }
+    assert.equal(alive, 0, "the stalled child process is gone");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 // ------------------------------------------------------------------ live (operator opt-in)
@@ -155,9 +208,10 @@ function adapterFor(capabilityId: DesktopObservationCapabilityId): WindowsDeskto
   return a;
 }
 
-async function observe(raw: Record<string, unknown>) {
+async function observe(raw: Record<string, unknown>, maxWallClockOverride?: number) {
   const input = { hostId: "wa-p1a2-host", sessionId: "wa-p1a2-session", ownerId: "wa-p1a2-operator", ...raw } as DesktopObservationRequest;
-  const parameters = normalizeDesktopObservationRequest(input);
+  const normalized = normalizeDesktopObservationRequest(input);
+  const parameters = maxWallClockOverride === undefined ? normalized : { ...normalized, maxWallClockMs: maxWallClockOverride };
   seq += 1;
   const request: DesktopObservationAdapterRequest = {
     schemaVersion: "toadaid.desktop-observation-adapter-request.v1",
@@ -250,6 +304,35 @@ test("WA-P1A.2 F3 (native, live): an absent match returns matched=false inside t
     observe({ kind: "WAIT_FOR", windowId: `hwnd-${f.ready.hwnd}`, condition: "text_exists", text: `wa-p1a2-absent-${f.nonce}`, timeoutMs: 200, intervalMs: 100 }),
     /deadline exhausted|timed out|worker failed/,
   );
+});
+
+async function waitEvidence(o: Awaited<ReturnType<typeof observe>>) {
+  const art = o.result.artifacts.find((a) => a.kind === "WAIT_RESULT")!;
+  return JSON.parse((await readFile(o.adapter.resolveArtifactPath(art.id)!, "utf8")).replace(/^\uFEFF/, "")) as { matched: boolean; reason: string; requestedTimeoutMs: number; observedIntervalMs: number; checks: number };
+}
+
+test("WA-P1A.2 review (native, live): wait evidence distinguishes a full timeout, a budget-truncated wait and a match", { skip: LIVE_SKIP }, async () => {
+  const f = fixture!;
+  const absent = `wa-p1a2-absent-${f.nonce}`;
+  // Full requested timeout inside a larger wall-clock budget.
+  const full = await observe({ kind: "WAIT_FOR", windowId: `hwnd-${f.ready.hwnd}`, condition: "text_exists", text: absent, timeoutMs: 1_500, intervalMs: 250 }, 8_000);
+  const fe = await waitEvidence(full);
+  assert.equal(full.result.matched, false);
+  assert.equal(fe.reason, "REQUEST_TIMEOUT_ELAPSED");
+  assert.ok(fe.observedIntervalMs >= 1_000, `observed ${fe.observedIntervalMs} ms of the requested 1500 ms`);
+  // Contract-shaped wait (timeout == wall clock): the inner budget ends it first.
+  const truncated = await observe({ kind: "WAIT_FOR", windowId: `hwnd-${f.ready.hwnd}`, condition: "text_exists", text: absent, timeoutMs: 3_000, intervalMs: 250 });
+  const te = await waitEvidence(truncated);
+  assert.equal(truncated.result.matched, false);
+  assert.equal(te.reason, "WORKER_BUDGET_REACHED");
+  assert.ok(te.observedIntervalMs < te.requestedTimeoutMs, "the evidence shows less than the requested interval was observed");
+  // Match before any deadline.
+  const hit = await observe({ kind: "WAIT_FOR", windowId: `hwnd-${f.ready.hwnd}`, condition: "text_exists", text: "WA-P1A.2 visible label", timeoutMs: 4_000, intervalMs: 250 });
+  const he = await waitEvidence(hit);
+  assert.equal(hit.result.matched, true);
+  assert.equal(he.reason, "MATCHED");
+  // A wait longer than its wall clock is refused, never reported as a full wait.
+  await assert.rejects(observe({ kind: "WAIT_FOR", windowId: `hwnd-${f.ready.hwnd}`, condition: "text_exists", text: absent, timeoutMs: 20_000, intervalMs: 250 }, 3_000), /WAIT_TIMEOUT_EXCEEDS_WALL_CLOCK/);
 });
 
 test("WA-P1A.2 F4 (native, live): region-only captures outside or partly outside the displays are refused; inside is captured", { skip: LIVE_SKIP }, async () => {

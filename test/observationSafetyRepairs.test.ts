@@ -13,6 +13,10 @@ import type {
 import {
   createWindowsDesktopObservationAdapter,
 } from "../src/windowsObservationAdapter.js";
+
+// Mirrors ADAPTER_WATCHDOG_GRACE_MS; kept literal so this test also runs (and
+// fails, rather than failing to import) against an adapter without a watchdog.
+const ADAPTER_WATCHDOG_GRACE_MS = 2_000;
 import type {
   WindowsObservationWorker,
 } from "../src/windowsObservationAdapter.js";
@@ -107,6 +111,34 @@ test("WA-P1A.2 F3: the worker receives an inner deadline before the adapter's ou
   }
 });
 
+test("WA-P1A.2 review: a wait longer than its wall clock is refused before the worker runs", async () => {
+  const root = await mkdtemp(join(tmpdir(), "wa-p1a2-refuse-"));
+  try {
+    let calls = 0;
+    const worker: WindowsObservationWorker = { async run() { calls += 1; throw new Error("must not run"); } };
+    const adapter = createWindowsDesktopObservationAdapter({ registration, artifactRoot: root, worker, platform: "linux" });
+    const base = waitRequest(3_000);
+    await assert.rejects(adapter.observe({ ...base, parameters: { ...base.parameters, timeoutMs: 20_000 } }), /WAIT_TIMEOUT_EXCEEDS_WALL_CLOCK/);
+    assert.equal(calls, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("WA-P1A.2 review: the adapter's own watchdog bounds a worker that never answers", { timeout: 8_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "wa-p1a2-watchdog-"));
+  try {
+    const worker: WindowsObservationWorker = { run: () => new Promise(() => {}) };
+    const adapter = createWindowsDesktopObservationAdapter({ registration, artifactRoot: root, worker, platform: "linux" });
+    const started = Date.now();
+    await assert.rejects(adapter.observe(waitRequest(500)), /exceeded the adapter watchdog/);
+    const elapsed = Date.now() - started;
+    assert.ok(elapsed >= 500 + ADAPTER_WATCHDOG_GRACE_MS - 50 && elapsed < 500 + ADAPTER_WATCHDOG_GRACE_MS + 1_500, `watchdog fired after ${elapsed} ms`);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("WA-P1A.2 source guards: region coverage, window containment, name redaction, oracle-safe text wait", async () => {
   const source = await readFile(new URL("../../worker/windows-observation.ps1", import.meta.url), "utf8");
   for (const required of [
@@ -119,6 +151,10 @@ test("WA-P1A.2 source guards: region coverage, window containment, name redactio
     "if ($policy.nameRecorded) {",
     "(Text-PolicyFor (Element-TextFacts $candidate)).nameRecorded",
     "wait deadline exhausted before the first check",
+    "public static bool TryGetStyle(",
+    "$editStyleUnverified = $editClass -and -not $styleVerified",
+    "function Safe-Identifier",
+    '$reason = "WORKER_BUDGET_REACHED"',
     'if ($MyInvocation.InvocationName -ne ".") {',
   ]) {
     assert.equal(source.includes(required), true, required);
