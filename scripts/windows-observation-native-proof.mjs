@@ -22,6 +22,8 @@
 // capability pin / installed-build mismatch. Clean clones and linked git
 // worktrees resolve identically. With no committed lockfile, the manifest-pin
 // fallback needs --accept-manifest-pin-without-lockfile.
+// --expect-head <40-hex SHA> additionally requires HEAD to be exactly that
+// commit (WA_P1B_EXPECTED_HEAD_INVALID / WA_P1B_HEAD_MISMATCH, exit 4).
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -49,11 +51,13 @@ const FIXTURE_READY_MS = 30_000;
 const CHILD_KILL_MS = 60_000;
 
 function parseArgs(argv) {
-  const out = { consent: null, out: null, keep: false, preflightOnly: false, allowManifestPinFallback: false };
+  const out = { consent: null, out: null, keep: false, preflightOnly: false, allowManifestPinFallback: false, expectHead: null };
   for (let i = 0; i < argv.length; i += 1) {
     if (argv[i] === "--consent") out.consent = argv[++i] ?? null;
     else if (argv[i] === "--preflight-only") out.preflightOnly = true;
     else if (argv[i] === "--accept-manifest-pin-without-lockfile") out.allowManifestPinFallback = true;
+    // A missing value becomes "" so the preflight refuses it with a typed code.
+    else if (argv[i] === "--expect-head") out.expectHead = argv[++i] ?? "";
     else if (argv[i] === "--out") out.out = argv[++i] ?? null;
     else if (argv[i] === "--keep-artifacts") out.keep = true;
     else throw new Error(`unknown argument: ${argv[i]}`);
@@ -88,7 +92,7 @@ function runPs(file, args, timeoutMs) {
 /** Source + capability identity; throws ProofPreflightError before anything is created. */
 async function preflight(args) {
   return {
-    adapter: await resolveSourceIdentity(REPO, { requireClean: true }),
+    adapter: await resolveSourceIdentity(REPO, { requireClean: true, expectedHead: args.expectHead }),
     capability: await resolveCapabilityIdentity(REPO, { allowManifestPinFallback: args.allowManifestPinFallback }),
   };
 }

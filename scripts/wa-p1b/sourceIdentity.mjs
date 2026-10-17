@@ -47,11 +47,18 @@ function git(repo, args, options) {
 }
 
 /**
- * Exact source identity of the harness repository.
- * @returns {{ commit: string, ref: string|null, worktree: "MAIN"|"LINKED", clean: boolean, dirtyEntries: number }}
+ * Exact source identity of the harness repository. With `expectedHead` (one
+ * complete 40-character lowercase SHA-1), HEAD must be exactly that commit.
+ * @returns {{ commit: string, ref: string|null, worktree: "MAIN"|"LINKED", clean: boolean, dirtyEntries: number, headExpectation: "MATCHED"|"NOT_REQUESTED" }}
  */
 export async function resolveSourceIdentity(repo, options = {}) {
   const requireClean = options.requireClean ?? true;
+  const expectedHead = options.expectedHead ?? null;
+  // Validated before any git call: only one complete commit SHA is accepted
+  // (no abbreviations, refs, upper case or surrounding whitespace).
+  if (expectedHead !== null && (typeof expectedHead !== "string" || !/^[0-9a-f]{40}$/.test(expectedHead))) {
+    fail("WA_P1B_EXPECTED_HEAD_INVALID", "the expected HEAD must be one complete 40-character lowercase hex commit SHA");
+  }
   const top = git(repo, ["rev-parse", "--show-toplevel"], options);
   if (top.status !== 0) fail("WA_P1B_REPO_NOT_FOUND", "the harness directory is not inside a git work tree");
   let repoReal;
@@ -67,6 +74,7 @@ export async function resolveSourceIdentity(repo, options = {}) {
   const head = git(repo, ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"], options);
   const commit = head.stdout.trim();
   if (head.status !== 0 || !/^[0-9a-f]{40}$/.test(commit)) fail("WA_P1B_HEAD_UNEXPECTED", "HEAD does not resolve to a single SHA-1 commit");
+  if (expectedHead !== null && commit !== expectedHead) fail("WA_P1B_HEAD_MISMATCH", `HEAD is ${commit}, not the expected ${expectedHead}`);
 
   const sym = git(repo, ["symbolic-ref", "--quiet", "--short", "HEAD"], options);
   const ref = sym.status === 0 && sym.stdout.trim() !== "" ? sym.stdout.trim() : null;
@@ -87,7 +95,7 @@ export async function resolveSourceIdentity(repo, options = {}) {
   if (requireClean && dirtyEntries > 0) {
     fail("WA_P1B_WORKTREE_DIRTY", `the work tree has ${dirtyEntries} modified or untracked entr${dirtyEntries === 1 ? "y" : "ies"}; exact-source evidence needs a clean checkout`);
   }
-  return { commit, ref, worktree, clean: dirtyEntries === 0, dirtyEntries };
+  return { commit, ref, worktree, clean: dirtyEntries === 0, dirtyEntries, headExpectation: expectedHead === null ? "NOT_REQUESTED" : "MATCHED" };
 }
 
 function commitOf(spec) {

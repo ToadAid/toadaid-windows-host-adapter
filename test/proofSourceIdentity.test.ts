@@ -14,7 +14,7 @@ import { pathToFileURL } from "node:url";
 // fixture window, no live desktop. Every fixture root is removed afterwards.
 
 type Identity = {
-  resolveSourceIdentity: (repo: string, options?: Record<string, unknown>) => Promise<{ commit: string; ref: string | null; worktree: string; clean: boolean; dirtyEntries: number }>;
+  resolveSourceIdentity: (repo: string, options?: Record<string, unknown>) => Promise<{ commit: string; ref: string | null; worktree: string; clean: boolean; dirtyEntries: number; headExpectation: string }>;
   resolveCapabilityIdentity: (repo: string, options?: Record<string, unknown>) => Promise<{ pinnedCommit: string; lockedCommit: string | null; installedCommit: string; lockfile: string; desktopObservationJsSha256: string }>;
   APPROVED_CAPABILITY_COMMIT: string;
   APPROVED_CONTRACT_SHA256: string;
@@ -173,4 +173,69 @@ test("WA-PROOF-PORTABILITY-P1: --preflight-only never observes, refuses early wi
     assert.match(r.stderr, /^WA_P1B_PREFLIGHT_REFUSED code=WA_P1B_[A-Z_]+$/m);
   }
   assert.equal(/WA_P1B_FIXTURE|screenshot|UI_SNAPSHOT/i.test(r.stdout), false, "no observation output");
+});
+
+test("WA-PROOF-PORTABILITY-P1 review: an expected HEAD must match exactly, in a clean clone and in a linked worktree", async () => {
+  const { resolveSourceIdentity } = await load();
+  await withFixture({}, async ({ root, repo }) => {
+    const head = git(repo, "rev-parse", "HEAD");
+    const main = await resolveSourceIdentity(repo, { expectedHead: head });
+    assert.deepEqual({ commit: main.commit, worktree: main.worktree, headExpectation: main.headExpectation }, { commit: head, worktree: "MAIN", headExpectation: "MATCHED" });
+    assert.equal((await resolveSourceIdentity(repo)).headExpectation, "NOT_REQUESTED");
+    await refuses(resolveSourceIdentity(repo, { expectedHead: OTHER }), "WA_P1B_HEAD_MISMATCH");
+
+    const linked = join(root, "linked");
+    git(repo, "worktree", "add", "-q", "--detach", linked, "HEAD");
+    const wt = await resolveSourceIdentity(linked, { expectedHead: head });
+    assert.deepEqual({ commit: wt.commit, worktree: wt.worktree, headExpectation: wt.headExpectation }, { commit: head, worktree: "LINKED", headExpectation: "MATCHED" });
+    await refuses(resolveSourceIdentity(linked, { expectedHead: OTHER }), "WA_P1B_HEAD_MISMATCH");
+
+    // a new commit moves HEAD: the old expectation no longer matches
+    git(repo, "commit", "-q", "--allow-empty", "-m", "moved");
+    await refuses(resolveSourceIdentity(repo, { expectedHead: head }), "WA_P1B_HEAD_MISMATCH");
+    assert.equal((await resolveSourceIdentity(repo, { expectedHead: git(repo, "rev-parse", "HEAD") })).headExpectation, "MATCHED");
+  });
+});
+
+test("WA-PROOF-PORTABILITY-P1 review: a malformed expected HEAD is refused before any git call", async () => {
+  const { resolveSourceIdentity } = await load();
+  await withFixture({}, async ({ repo }) => {
+    const head = git(repo, "rev-parse", "HEAD");
+    for (const bad of ["", "abc", head.slice(0, 39), head.slice(0, 7), head.toUpperCase(), `${head}0`, "g".repeat(40), ` ${head}`, `${head}\n`, "c".repeat(64), "HEAD", "main"]) {
+      await refuses(resolveSourceIdentity(repo, { expectedHead: bad }), "WA_P1B_EXPECTED_HEAD_INVALID");
+    }
+    // validated before git runs: even without git the malformed value is the reported refusal
+    await refuses(resolveSourceIdentity(repo, { expectedHead: "abc", gitBinary: "toadaid-definitely-not-git" }), "WA_P1B_EXPECTED_HEAD_INVALID");
+  });
+});
+
+test("WA-PROOF-PORTABILITY-P1 review: the harness refuses malformed or mismatched --expect-head with exit 4, before any temp directory", async () => {
+  const iso = await mkdtemp(join(tmpdir(), "toadaid-proof-expect-head-"));
+  try {
+    const env = { ...process.env, TMPDIR: iso, TEMP: iso, TMP: iso };
+    const run = (...args: string[]) => spawnSync(process.execPath, [HARNESS, "--preflight-only", ...args], { encoding: "utf8", windowsHide: true, timeout: 60_000, env });
+    for (const [args, code] of [
+      [["--expect-head", "not-a-sha"], "WA_P1B_EXPECTED_HEAD_INVALID"],
+      [["--expect-head"], "WA_P1B_EXPECTED_HEAD_INVALID"],
+      [["--expect-head", "0".repeat(40)], "WA_P1B_HEAD_MISMATCH"],
+    ] as const) {
+      const r = run(...args);
+      assert.equal(r.status, 4, `${args.join(" ")}: ${r.stdout}${r.stderr}`);
+      assert.match(r.stderr, new RegExp(`^WA_P1B_PREFLIGHT_REFUSED code=${code}$`, "m"));
+      assert.equal(r.stdout, "", "a refusal prints no identity and no observation output");
+    }
+    const head = spawnSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
+    const ok = run("--expect-head", head);
+    if (ok.status === 0) {
+      const out = JSON.parse(ok.stdout) as { preflight: string; observation: string; adapter: { commit: string; headExpectation: string } };
+      assert.deepEqual([out.preflight, out.observation, out.adapter.commit, out.adapter.headExpectation], ["PASS", "NOT_RUN", head, "MATCHED"]);
+    } else {
+      // a developer checkout with local edits is refused, typed, after the HEAD matched
+      assert.equal(ok.status, 4, ok.stderr);
+      assert.match(ok.stderr, /^WA_P1B_PREFLIGHT_REFUSED code=WA_P1B_WORKTREE_DIRTY$/m);
+    }
+    assert.deepEqual(await readdir(iso), [], "the harness created nothing in the temp directory");
+  } finally {
+    await rm(iso, { recursive: true, force: true });
+  }
 });
