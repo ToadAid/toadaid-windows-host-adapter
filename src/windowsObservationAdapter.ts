@@ -68,7 +68,22 @@ export interface WindowsObservationWorker {
   run(
     request: DesktopObservationAdapterRequest,
     artifactRoot: string,
+    workerDeadlineUtcMs?: number,
   ): Promise<WindowsObservationWorkerResponse>;
+}
+
+/**
+ * WA-P1A.2 F3: the worker must finish (and report, e.g. `matched=false`)
+ * before the adapter's outer wall clock kills it. The worker receives an
+ * inner deadline this many milliseconds before the outer one.
+ */
+export function workerDeadlineReserveMs(
+  maxWallClockMs: number,
+): number {
+  return Math.min(
+    750,
+    Math.floor(maxWallClockMs / 4),
+  );
 }
 
 export interface WindowsObservationAdapterOptions {
@@ -399,22 +414,27 @@ export function buildWindowsPowerShellInvocation(
 class PowerShellWindowsObservationWorker
   implements WindowsObservationWorker {
   readonly #powershellPath: string;
+  readonly #workerPath: string;
 
   constructor(
     powershellPath:
       string =
         defaultWindowsPowerShellPath(),
+    workerPath: string = WORKER_PATH,
   ) {
     this.#powershellPath = powershellPath;
+    this.#workerPath = workerPath;
   }
 
   async run(
     request: DesktopObservationAdapterRequest,
     artifactRoot: string,
+    workerDeadlineUtcMs?: number,
   ): Promise<WindowsObservationWorkerResponse> {
     const invocation =
       buildWindowsPowerShellInvocation(
         this.#powershellPath,
+        this.#workerPath,
       );
 
     return await new Promise(
@@ -524,12 +544,59 @@ class PowerShellWindowsObservationWorker
           JSON.stringify({
             request,
             artifactRoot,
+            workerDeadlineUtcMs:
+              workerDeadlineUtcMs ?? null,
           }),
           "utf8",
         );
       },
     );
   }
+}
+
+/**
+ * The real PowerShell worker transport (spawn, bounded output, outer kill at
+ * `maxWallClockMs`). Exposed so native tests can prove the outer watchdog with
+ * a deliberately unresponsive synthetic script; production uses the default
+ * worker path. The path is validated like the default one (local, absolute).
+ */
+export function createPowerShellWindowsObservationWorker(
+  powershellPath: string,
+  workerPath: string = WORKER_PATH,
+): WindowsObservationWorker {
+  buildWindowsPowerShellInvocation(powershellPath, workerPath);
+  return new PowerShellWindowsObservationWorker(
+    powershellPath,
+    workerPath,
+  );
+}
+
+/** Extra time the adapter's own watchdog allows beyond `maxWallClockMs`. */
+export const ADAPTER_WATCHDOG_GRACE_MS = 2_000;
+
+function withAdapterWatchdog<T>(
+  work: Promise<T>,
+  maxWallClockMs: number,
+): Promise<T> {
+  return new Promise<T>((resolvePromise, rejectPromise) => {
+    const timer = setTimeout(() => {
+      rejectPromise(
+        new Error(
+          "Windows observation worker exceeded the adapter watchdog",
+        ),
+      );
+    }, maxWallClockMs + ADAPTER_WATCHDOG_GRACE_MS);
+    work.then(
+      (value) => {
+        clearTimeout(timer);
+        resolvePromise(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        rejectPromise(error);
+      },
+    );
+  });
 }
 
 export function createWindowsDesktopObservationAdapter(
@@ -613,6 +680,19 @@ export function createWindowsDesktopObservationAdapter(
         );
       }
 
+      if (
+        request.parameters.kind === "WAIT_FOR" &&
+        request.parameters.timeoutMs >
+          request.maxWallClockMs
+      ) {
+        // WA-P1A.2 review: a wait longer than its wall-clock budget can only
+        // be observed partially; refuse instead of returning a matched=false
+        // that would read as the full requested timeout.
+        throw new Error(
+          "WAIT_TIMEOUT_EXCEEDS_WALL_CLOCK: Windows wait-for timeoutMs exceeds maxWallClockMs",
+        );
+      }
+
       await mkdir(
         artifactRoot,
         {
@@ -622,9 +702,17 @@ export function createWindowsDesktopObservationAdapter(
 
       const workerResult =
         normalizeWorkerResponse(
-          await worker.run(
-            request,
-            artifactRoot,
+          await withAdapterWatchdog(
+            worker.run(
+              request,
+              artifactRoot,
+              Date.now() +
+                request.maxWallClockMs -
+                workerDeadlineReserveMs(
+                  request.maxWallClockMs,
+                ),
+            ),
+            request.maxWallClockMs,
           ),
           request,
         );
