@@ -89,3 +89,52 @@ test("WA-P1B report: the PNG reader returns real dimensions and pixels (None + U
   assert.throws(() => image.pixel(5, 0), RangeError);
   assert.throws(() => h.readPng(Buffer.from("not a png at all, definitely not")), /not a PNG/);
 });
+
+type LineHelpers = {
+  splitCompleteLines(buffer: string): { lines: string[]; rest: string };
+  parsePrefixedRecord(line: string, prefix: string): Record<string, unknown> | null;
+  bindFixtureElement(elements: readonly unknown[], rect: { left: number; top: number; right: number; bottom: number }, classPattern?: RegExp): { element?: unknown; ambiguous?: number };
+};
+const loadLines = async () => (await import(helperUrl)) as LineHelpers;
+
+test("WA-P1B harness: only complete, newline-terminated, exact-prefixed ready records are parsed, across any chunk boundary", async () => {
+  const h = await loadLines();
+  const record = 'WA_P1B_FIXTURE_READY {"pid":42,"mainHwnd":7,"nonce":"abc"}\r\n';
+  const stream = `noise line\n${record}{"marker":"WA_P1B_FIXTURE_CLOSED"}\n`;
+  for (let cut = 0; cut <= stream.length; cut += 1) {
+    let buffer = "";
+    const found: Record<string, unknown>[] = [];
+    for (const chunk of [stream.slice(0, cut), stream.slice(cut)]) {
+      const { lines, rest } = h.splitCompleteLines(buffer + chunk);
+      buffer = rest;
+      for (const line of lines) {
+        const r = h.parsePrefixedRecord(line, "WA_P1B_FIXTURE_READY");
+        if (r !== null) found.push(r);
+      }
+    }
+    assert.equal(found.length, 1, `cut at ${cut}`);
+    assert.deepEqual(found[0], { pid: 42, mainHwnd: 7, nonce: "abc" });
+  }
+  // A partial record is never parsed (it stays in `rest`).
+  const partial = h.splitCompleteLines('WA_P1B_FIXTURE_READY {"pid":4');
+  assert.deepEqual(partial.lines, []);
+  assert.equal(partial.rest, 'WA_P1B_FIXTURE_READY {"pid":4');
+  // The marker inside some other line is not a record; a corrupt record fails loudly.
+  assert.equal(h.parsePrefixedRecord('{"marker":"WA_P1B_FIXTURE_READY"}', "WA_P1B_FIXTURE_READY"), null);
+  assert.equal(h.parsePrefixedRecord("xWA_P1B_FIXTURE_READY {}", "WA_P1B_FIXTURE_READY"), null);
+  assert.throws(() => h.parsePrefixedRecord("WA_P1B_FIXTURE_READY {\"pid\":", "WA_P1B_FIXTURE_READY"));
+  assert.throws(() => h.parsePrefixedRecord("WA_P1B_FIXTURE_READY [1]", "WA_P1B_FIXTURE_READY"), /not a JSON object/);
+});
+
+test("WA-P1B harness: fixture elements are bound by exact geometry + class, never by value; ambiguity is refused", async () => {
+  const h = await loadLines();
+  const rect = { left: 448, top: 248, right: 688, bottom: 268 };
+  const el = (left: number, top: number, w: number, hgt: number, className: string | null) => ({ bounds: { left, top, width: w, height: hgt }, className });
+  const target = el(448, 248, 240, 20, "WindowsForms10.EDIT.app.0.1");
+  assert.equal(h.bindFixtureElement([el(144, 248, 240, 20, "WindowsForms10.EDIT.app.0.1"), target], rect, /EDIT/i).element, target);
+  assert.deepEqual(h.bindFixtureElement([el(144, 248, 240, 20, "WindowsForms10.EDIT.app.0.1")], rect, /EDIT/i), { ambiguous: 0 });
+  assert.deepEqual(h.bindFixtureElement([target, { ...target }], rect, /EDIT/i), { ambiguous: 2 });
+  assert.deepEqual(h.bindFixtureElement([el(448, 248, 240, 20, "WindowsForms10.STATIC.app.0.1")], rect, /EDIT/i), { ambiguous: 0 });
+  const redactedClass = el(448, 248, 240, 20, null);
+  assert.equal(h.bindFixtureElement([redactedClass], rect, /EDIT/i).element, redactedClass);
+});

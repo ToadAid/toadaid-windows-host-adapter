@@ -21,11 +21,14 @@ import { fileURLToPath } from "node:url";
 
 import {
   assertRedacted,
+  bindFixtureElement,
   buildProofReport,
   canonicalJson,
+  parsePrefixedRecord,
   proofCase,
   readPng,
   sha256Hex,
+  splitCompleteLines,
 } from "./wa-p1b/proofReport.mjs";
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -105,13 +108,22 @@ async function main() {
   }
 
   const capabilities = await import("@toadaid/agent-capabilities");
-  const { createWindowsDesktopObservationAdapter } = await import(new URL("../dist/src/index.js", import.meta.url).href);
+  const adapterModule = await import(new URL("../dist/src/index.js", import.meta.url).href);
+  const { createWindowsDesktopObservationAdapter } = adapterModule;
 
   const nonce = randomBytes(8).toString("hex");
   const work = await realpath(await mkdtemp(join(tmpdir(), "toadaid-wa-p1b-")));
   const artifactRoot = join(work, "artifacts");
   await mkdir(artifactRoot, { recursive: true });
   const closeFile = join(work, `close-${nonce}`);
+  // Abort cleanup: on Ctrl+C close the fixture (it honours the close file) and
+  // delete every local artifact before exiting.
+  process.once("SIGINT", () => {
+    writeFile(closeFile, "close").catch(() => {})
+      .then(() => new Promise((r) => setTimeout(r, 1_000)))
+      .then(() => (args.keep ? undefined : rm(work, { recursive: true, force: true })))
+      .finally(() => process.exit(130));
+  });
   const cases = [];
   const add = (...a) => cases.push(proofCase(...a));
   let fixture = null;
@@ -263,8 +275,12 @@ async function main() {
     const treeEls = Array.isArray(tree.elements) ? tree.elements : [tree.elements];
     const names = new Set(treeEls.map((e) => e.name));
     const probeWin = JSON.parse(await runPs(probeFile, ["-Hwnd", String(fx.mainHwnd)], 30_000)).window;
-    const secretEl = treeEls.find((e) => e.automationId === "wa-p1b-password-input");
-    const ordinaryEl = treeEls.find((e) => e.automationId === "wa-p1b-ordinary-input");
+    // Bind the synthetic text boxes by fixture-reported geometry + edit class
+    // (WinForms automationIds are runtime IDs); refuse if not exactly one.
+    const secretBind = bindFixtureElement(treeEls, fx.passwordBounds, /EDIT/i);
+    const ordinaryBind = bindFixtureElement(treeEls, fx.ordinaryBounds, /EDIT/i);
+    const secretEl = secretBind.element;
+    const ordinaryEl = ordinaryBind.element;
     const evidenceById = new Map((ui.elements ?? []).map((e) => [e.elementId, e]));
     // Every C04 element is owned by the synthetic fixture process (asserted), so its
     // synthetic strings may be reported; anything else is reported only as a hash.
@@ -277,7 +293,7 @@ async function main() {
     })) : [];
     const secretOk = secretEl !== undefined && evidenceById.get(secretEl.elementId)?.inputSecurity === "SECRET_OR_PASSWORD";
     const leak = JSON.stringify(tree).includes("synthetic-not-a-secret");
-    add("C04B-EXACT-WINDOW-SECRET-HANDLING", secretOk && !leak ? "PASS" : "FAIL", { passwordElementFound: secretEl !== undefined, passwordInputClassifiedSecret: secretOk, passwordValueAbsentFromTree: !leak }, "a password field must be classified SECRET_OR_PASSWORD and its value must never enter the UI tree artifact");
+    add("C04B-EXACT-WINDOW-SECRET-HANDLING", secretOk && !leak ? "PASS" : "FAIL", { passwordElementFound: secretEl !== undefined, passwordElementBinding: "FIXTURE_GEOMETRY_AND_EDIT_CLASS", passwordBindingCandidates: secretEl !== undefined ? 1 : secretBind.ambiguous, passwordInputClassifiedSecret: secretOk, passwordValueAbsentFromTree: !leak }, secretEl === undefined ? "the password element could not be bound uniquely to the fixture geometry (refused, not guessed)" : "a password field must be classified SECRET_OR_PASSWORD and its value must never enter the UI tree artifact");
     add("C04C-EXACT-WINDOW-GEOMETRY", !names.has("WA-P1B clipped text delta") ? "PASS" : "FAIL", { clippedChildFilteredOut: !names.has("WA-P1B clipped text delta"), elementsOutsideWindowBounds: elementTable.filter((e) => !e.boundsInsideWindow).length }, "a child positioned far outside its window must not be reported as observable geometry");
     add("C04-EXACT-WINDOW-UI-SNAPSHOT", uiArtifacts.every((a) => a.diskSha256Matches && a.contained) && treeEls.every((e) => e.processId === fixturePid) && names.has("WA-P1B synthetic text alpha") && names.has("WA-P1B synthetic text beta") && Array.isArray(ui.elements) && ui.elements.length === treeEls.length ? "PASS" : "FAIL", {
       elementTable,
@@ -352,7 +368,15 @@ async function main() {
     const t1 = Date.now();
     let w2;
     try { w2 = await observe({ kind: "WAIT_FOR", windowId: mainWindowId, condition: "text_exists", text: `WA-P1B absent text ${nonce}`, timeoutMs: 1_500, intervalMs: 250 }); } catch (e) { w2 = { error: String(e?.message ?? e) }; }
+    let w2Reason = null;
+    if (w2.error === undefined && Array.isArray(w2.artifacts)) {
+      try {
+        const wa = (await verifyArtifacts("WAIT_FOR", w2)).find((a) => a.kind === "WAIT_RESULT");
+        w2Reason = JSON.parse((await readFile(wa.path, "utf8")).replace(/^\uFEFF/, "")).reason ?? null;
+      } catch { w2Reason = null; }
+    }
     add("C09-WAIT-TEXT-ABSENT", w2.matched === false ? "PASS" : "FAIL", {
+      waitEvidenceReason: w2Reason,
       matched: w2.matched ?? null,
       adapterTimedOutInstead: w2.error !== undefined && /timed out/.test(w2.error),
       neverReportedMatched: w2.matched !== true,
@@ -362,7 +386,10 @@ async function main() {
     // ---------------------------------------------------------------- C10 wall-clock bound kills a long worker
     step = "C10";
     const t2 = Date.now();
-    await refusal("C10-WALLCLOCK-TIMEOUT", () => observe({ kind: "WAIT_FOR", windowId: mainWindowId, condition: "text_exists", text: `WA-P1B absent text ${nonce}`, timeoutMs: 20_000, intervalMs: 250 }, { maxWallClockMs: 3_000 }), /timed out/);
+    // A wait longer than its wall clock must never complete as if the full
+    // timeout had been observed: either a typed refusal (WA-P1A.2) or the
+    // outer watchdog (landed main) is acceptable; matched=false is not.
+    await refusal("C10-WALLCLOCK-TIMEOUT", () => observe({ kind: "WAIT_FOR", windowId: mainWindowId, condition: "text_exists", text: `WA-P1B absent text ${nonce}`, timeoutMs: 20_000, intervalMs: 250 }, { maxWallClockMs: 3_000 }), /timed out|WAIT_TIMEOUT_EXCEEDS_WALL_CLOCK/);
     cases[cases.length - 1] = proofCase(cases.at(-1).id, cases.at(-1).classification === "PASS" && Date.now() - t2 < 15_000 ? "PASS" : "FAIL", { ...cases.at(-1).facts, boundedWithin15s: Date.now() - t2 < 15_000 }, cases.at(-1).reason);
 
     // ---------------------------------------------------------------- refusals
@@ -392,7 +419,46 @@ async function main() {
     step = "NOT-NATIVELY";
     add("U01-UNSUPPORTED-SESSION-DESKTOP", "UNSUPPORTED", { remoteSession: envRaw.remoteSession, sessionId: envRaw.sessionId, activeConsoleSessionId: envRaw.activeConsoleSessionId, desktop: envRaw.desktop }, "only the operator's interactive console session/Default desktop exists here; secure desktop, other sessions and RDP are WA-P1C");
     add("U02-OVERSIZED-MALFORMED-WORKER-OUTPUT", "BLOCKED", {}, "the real worker cannot be made to emit oversized/malformed output without modifying it; covered by fake-worker source tests only");
-    add("U03-NATIVE-CSHARP-SKELETON", "BLOCKED", {}, "no .NET SDK on this host; installing one needs an explicit human OK; the skeleton is not observation parity in any case");
+    step = "W01";
+    // Outer watchdog against a deliberately unresponsive SYNTHETIC worker (no
+    // observation at all). Needs the worker seam that WA-P1A.2 exposes.
+    if (typeof adapterModule.createPowerShellWindowsObservationWorker !== "function") {
+      add("W01-STALLED-WORKER-WATCHDOG", "BLOCKED", {}, "the adapter under test exposes no worker seam (WA-P1A.2 not applied)");
+    } else {
+      const stallMarker = randomBytes(8).toString("hex");
+      const stallFile = join(work, `stalled-worker-${stallMarker}.ps1`);
+      await writeFile(stallFile, "Start-Sleep -Seconds 120\n", { flag: "wx" });
+      const stalled = adapterModule.createPowerShellWindowsObservationWorker(powershellPath(), stallFile);
+      const ws = Date.now();
+      let killed = false;
+      try { await stalled.run(adapterRequest({ kind: "DISPLAY_INVENTORY", maxWallClockMs: 1_500 }), join(work, "stall-artifacts"), Date.now() + 1_000); } catch (e) { killed = /timed out/.test(String(e?.message ?? e)); }
+      const probeFile = join(work, `stall-probe-${stallMarker}.ps1`);
+      await writeFile(probeFile, `$p = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" | Where-Object { $_.CommandLine -like '*stalled-worker-${stallMarker}*' }); [Console]::Out.Write($p.Count)`, { flag: "wx" });
+      let alive = -1;
+      for (let i = 0; i < 10; i += 1) { alive = Number(await runPs(probeFile, [], 30_000)); if (alive === 0) break; await new Promise((r) => setTimeout(r, 300)); }
+      add("W01-STALLED-WORKER-WATCHDOG", killed && alive === 0 && Date.now() - ws < 10_000 ? "PASS" : "FAIL", { killedByOuterWatchdog: killed, childProcessGone: alive === 0, boundedWithin10s: Date.now() - ws < 10_000 }, "a synthetic worker that never answers is killed at its wall clock and leaves no process");
+    }
+
+    step = "U03";
+    const csharpExe = process.env.TOADAID_NATIVE_CSHARP_WORKER;
+    if (!csharpExe) {
+      add("U03-NATIVE-CSHARP-SKELETON", "BLOCKED", {}, "set TOADAID_NATIVE_CSHARP_WORKER to a built native skeleton to exercise it; it is not observation parity in any case");
+    } else {
+      const { decodeProviderResponseFrame } = await import(new URL("../dist/src/providerProtocol.js", import.meta.url).href);
+      const frame = `${JSON.stringify({ protocolVersion: "toadaid.windows-provider-worker.v1", requestId: "wa-p1b-hs", generationId: "wa-p1b-gen", kind: "HANDSHAKE", payload: {} })}\n`;
+      const out = await new Promise((resolveOut) => {
+        const child = spawn(csharpExe, [], { shell: false, windowsHide: true, stdio: ["pipe", "pipe", "ignore"] });
+        let text = "";
+        const t = setTimeout(() => { child.kill(); resolveOut(null); }, 15_000);
+        child.stdout.setEncoding("utf8").on("data", (d) => { text += d; });
+        child.on("close", () => { clearTimeout(t); resolveOut(text); });
+        child.stdin.on("error", () => {});
+        child.stdin.end(frame);
+      });
+      let decoded = null;
+      try { decoded = out === null ? null : decodeProviderResponseFrame(out); } catch { decoded = null; }
+      add("U03-NATIVE-CSHARP-SKELETON", decoded?.status === "OK" ? "PASS" : "FAIL", { responded: out !== null, endsWithCrlf: typeof out === "string" && out.endsWith("\r\n"), strictV1HandshakeDecoded: decoded?.status === "OK" }, "one native C# skeleton HANDSHAKE decoded by the strict Node v1 decoder (skeleton only; no observation)");
+    }
     add("U04-DPI-MIXED-NEGATIVE-COORDS", displayList.length > 1 ? "PASS" : "UNSUPPORTED", { displayCount: displayList.length, appliedDpi: envRaw.appliedDpi, probeDpiAwareness: envRaw.probeDpiAwareness }, displayList.length > 1 ? "multiple displays present" : "single display: negative virtual coordinates and mixed DPI cannot be exercised on this host");
   } catch (error) {
     const message = String(error?.message ?? error);
@@ -417,14 +483,24 @@ function startFixture(fixtureFile, nonce, closeFile) {
     let buffer = "";
     let done = false;
     const killTimer = setTimeout(() => { if (!child.killed) child.kill(); }, 300_000);
-    const readyTimer = setTimeout(() => { if (!done) { done = true; child.kill(); rejectPromise(new Error("fixture did not become ready")); } }, FIXTURE_READY_MS);
+    const fail = (error) => { if (!done) { done = true; clearTimeout(readyTimer); clearTimeout(killTimer); child.kill(); rejectPromise(error); } };
+    const readyTimer = setTimeout(() => fail(new Error("fixture did not become ready")), FIXTURE_READY_MS);
     child.stdout.setEncoding("utf8").on("data", (d) => {
-      buffer += d;
-      const line = buffer.split(/\r?\n/).find((l) => l.includes("WA_P1B_FIXTURE_READY"));
-      if (line && !done) {
-        done = true;
-        clearTimeout(readyTimer);
-        resolvePromise({ child, killTimer, ready: JSON.parse(line) });
+      if (done) return;
+      // Only COMPLETE, newline-terminated, exact-prefixed records are parsed;
+      // a partial chunk stays buffered until its newline arrives.
+      const { lines, rest } = splitCompleteLines(buffer + d);
+      buffer = rest;
+      if (buffer.length > 65_536) { fail(new Error("fixture output exceeded bound before ready")); return; }
+      for (const line of lines) {
+        let ready = null;
+        try { ready = parsePrefixedRecord(line, "WA_P1B_FIXTURE_READY"); } catch (error) { fail(error); return; }
+        if (ready !== null) {
+          done = true;
+          clearTimeout(readyTimer);
+          resolvePromise({ child, killTimer, ready });
+          return;
+        }
       }
     });
     child.on("error", (e) => { if (!done) { done = true; clearTimeout(readyTimer); rejectPromise(e); } });

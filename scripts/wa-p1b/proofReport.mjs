@@ -82,6 +82,52 @@ export function assertRedacted(reportText, forbidden) {
   }
 }
 
+/**
+ * Splits a growing stdout buffer into COMPLETE newline-terminated lines.
+ * The trailing partial line (no newline yet) is returned as `rest` and is
+ * never parsed. A trailing CR before the LF is dropped.
+ */
+export function splitCompleteLines(buffer) {
+  const lines = [];
+  let start = 0;
+  for (;;) {
+    const nl = buffer.indexOf("\n", start);
+    if (nl < 0) break;
+    let line = buffer.slice(start, nl);
+    if (line.endsWith("\r")) line = line.slice(0, -1);
+    lines.push(line);
+    start = nl + 1;
+  }
+  return { lines, rest: buffer.slice(start) };
+}
+
+/**
+ * Parses one exact-prefixed record (`<PREFIX> <json-object>`). Returns null for
+ * any line that does not start with the exact prefix; throws on a prefixed line
+ * whose body is not a single JSON object (a complete but corrupt record).
+ */
+export function parsePrefixedRecord(line, prefix) {
+  if (!line.startsWith(`${prefix} `)) return null;
+  const value = JSON.parse(line.slice(prefix.length + 1));
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${prefix} record is not a JSON object`);
+  }
+  return value;
+}
+
+/**
+ * Finds the single tree element bound to a fixture-reported screen rectangle
+ * (exact geometry, optional class pattern). Returns { element } when exactly
+ * one matches, or { ambiguous: count } otherwise. Never searches by value.
+ */
+export function bindFixtureElement(elements, rect, classPattern) {
+  const hits = elements.filter((e) => e && e.bounds &&
+    Math.round(e.bounds.left) === rect.left && Math.round(e.bounds.top) === rect.top &&
+    Math.round(e.bounds.left + e.bounds.width) === rect.right && Math.round(e.bounds.top + e.bounds.height) === rect.bottom &&
+    (classPattern === undefined || e.className === null || e.className === undefined || classPattern.test(String(e.className))));
+  return hits.length === 1 ? { element: hits[0] } : { ambiguous: hits.length };
+}
+
 /** Minimal PNG reader: IHDR + 8-bit RGB/RGBA non-interlaced pixel sampling. */
 export function readPng(bytes) {
   const sig = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);

@@ -118,8 +118,12 @@ $main.Add_Shown({
   $occluder.BringToFront()
   [System.Windows.Forms.Application]::DoEvents()
   $proc = [System.Diagnostics.Process]::GetCurrentProcess()
+  $secretRect = $panelB.RectangleToScreen($secret.Bounds)
+  $ordinaryRect = $panelA.RectangleToScreen($ordinary.Bounds)
   $ready = @{
     marker = "WA_P1B_FIXTURE_READY"
+    passwordBounds = @{ left = $secretRect.Left; top = $secretRect.Top; right = $secretRect.Right; bottom = $secretRect.Bottom }
+    ordinaryBounds = @{ left = $ordinaryRect.Left; top = $ordinaryRect.Top; right = $ordinaryRect.Right; bottom = $ordinaryRect.Bottom }
     nonce = $Nonce
     pid = $proc.Id
     sessionId = $proc.SessionId
@@ -132,7 +136,8 @@ $main.Add_Shown({
     occluderBounds = @{ left = $occluder.Bounds.Left; top = $occluder.Bounds.Top; right = $occluder.Bounds.Right; bottom = $occluder.Bounds.Bottom }
     primaryBounds = @{ left = $screen.Bounds.Left; top = $screen.Bounds.Top; right = $screen.Bounds.Right; bottom = $screen.Bounds.Bottom }
   } | ConvertTo-Json -Compress
-  [Console]::Out.WriteLine($ready)
+  # One complete, exact-prefixed record; the harness parses nothing else.
+  [Console]::Out.Write("WA_P1B_FIXTURE_READY " + $ready + "`n")
   [Console]::Out.Flush()
   $timer.Start()
 })
