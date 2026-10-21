@@ -11,6 +11,19 @@
 // Usage (native Windows, operator present):
 //   npm run build
 //   node scripts/windows-observation-native-proof.mjs --consent OPERATOR_PRESENT_AND_CONSENTS [--out <report.json>] [--keep-artifacts]
+//
+// Source/capability preflight only (no observation, no temp directory, any OS):
+//   node scripts/windows-observation-native-proof.mjs --preflight-only
+//
+// The preflight (scripts/wa-p1b/sourceIdentity.mjs) runs before any temp
+// directory or fixture exists and refuses with WA_P1B_PREFLIGHT_REFUSED
+// code=<...> (exit 4) on: missing git, an ambiguous repository, an unexpected
+// HEAD, a dirty work tree, an untracked/modified/absent lockfile, or any
+// capability pin / installed-build mismatch. Clean clones and linked git
+// worktrees resolve identically. With no committed lockfile, the manifest-pin
+// fallback needs --accept-manifest-pin-without-lockfile.
+// --expect-head <40-hex SHA> additionally requires HEAD to be exactly that
+// commit (WA_P1B_EXPECTED_HEAD_INVALID / WA_P1B_HEAD_MISMATCH, exit 4).
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -30,6 +43,7 @@ import {
   sha256Hex,
   splitCompleteLines,
 } from "./wa-p1b/proofReport.mjs";
+import { ProofPreflightError, resolveCapabilityIdentity, resolveSourceIdentity } from "./wa-p1b/sourceIdentity.mjs";
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const CONSENT = "OPERATOR_PRESENT_AND_CONSENTS";
@@ -37,9 +51,13 @@ const FIXTURE_READY_MS = 30_000;
 const CHILD_KILL_MS = 60_000;
 
 function parseArgs(argv) {
-  const out = { consent: null, out: null, keep: false };
+  const out = { consent: null, out: null, keep: false, preflightOnly: false, allowManifestPinFallback: false, expectHead: null };
   for (let i = 0; i < argv.length; i += 1) {
     if (argv[i] === "--consent") out.consent = argv[++i] ?? null;
+    else if (argv[i] === "--preflight-only") out.preflightOnly = true;
+    else if (argv[i] === "--accept-manifest-pin-without-lockfile") out.allowManifestPinFallback = true;
+    // A missing value becomes "" so the preflight refuses it with a typed code.
+    else if (argv[i] === "--expect-head") out.expectHead = argv[++i] ?? "";
     else if (argv[i] === "--out") out.out = argv[++i] ?? null;
     else if (argv[i] === "--keep-artifacts") out.keep = true;
     else throw new Error(`unknown argument: ${argv[i]}`);
@@ -71,31 +89,21 @@ function runPs(file, args, timeoutMs) {
   });
 }
 
-async function readGitHead(repo) {
-  const head = (await readFile(join(repo, ".git", "HEAD"), "utf8")).trim();
-  if (/^[0-9a-f]{40}$/.test(head)) return { commit: head, ref: null };
-  const ref = head.replace(/^ref: /, "");
-  let commit = null;
-  try { commit = (await readFile(join(repo, ".git", ...ref.split("/")), "utf8")).trim(); } catch {
-    const packed = await readFile(join(repo, ".git", "packed-refs"), "utf8");
-    commit = packed.split("\n").find((l) => l.endsWith(` ${ref}`))?.slice(0, 40) ?? null;
-  }
-  return { commit, ref: ref.split("/").slice(2).join("/") };
-}
-
-async function capabilityIdentity(repo) {
-  const lock = JSON.parse(await readFile(join(repo, "package-lock.json"), "utf8"));
-  const entry = lock.packages?.["node_modules/@toadaid/agent-capabilities"] ?? {};
-  const resolved = String(entry.resolved ?? "");
-  const commit = /#([0-9a-f]{40})$/.exec(resolved)?.[1] ?? null;
-  const pinned = JSON.parse(await readFile(join(repo, "package.json"), "utf8")).dependencies["@toadaid/agent-capabilities"];
-  const pinnedCommit = /#([0-9a-f]{40})$/.exec(pinned)?.[1] ?? null;
-  const contract = await readFile(join(repo, "node_modules", "@toadaid", "agent-capabilities", "dist", "src", "desktopObservation.js"));
-  return { pinnedCommit, installedCommit: commit, desktopObservationJsSha256: sha256Hex(contract) };
+/** Source + capability identity; throws ProofPreflightError before anything is created. */
+async function preflight(args) {
+  return {
+    adapter: await resolveSourceIdentity(REPO, { requireClean: true, expectedHead: args.expectHead }),
+    capability: await resolveCapabilityIdentity(REPO, { allowManifestPinFallback: args.allowManifestPinFallback }),
+  };
 }
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  if (args.preflightOnly) {
+    const identity = await preflight(args);
+    process.stdout.write(`${canonicalJson({ schema: "toadaid.windows-observation-native-proof.preflight.v1", preflight: "PASS", observation: "NOT_RUN", ...identity })}\n`);
+    return;
+  }
   if (process.platform !== "win32") {
     console.error("WA_P1B_NATIVE_WINDOWS_REQUIRED");
     process.exitCode = 2;
@@ -106,6 +114,9 @@ async function main() {
     process.exitCode = 2;
     return;
   }
+
+  // Identity first: a refusal here leaves no temp directory and opens no window.
+  const identity = await preflight(args);
 
   const capabilities = await import("@toadaid/agent-capabilities");
   const adapterModule = await import(new URL("../dist/src/index.js", import.meta.url).href);
@@ -134,8 +145,8 @@ async function main() {
   const probeFile = join(REPO, "scripts", "wa-p1b", "env-probe.ps1");
 
   const subject = {
-    adapter: await readGitHead(REPO),
-    capability: await capabilityIdentity(REPO),
+    adapter: identity.adapter,
+    capability: identity.capability,
     workerSha256: sha256Hex(await readFile(workerFile)),
     fixtureSha256: sha256Hex(await readFile(fixtureFile)),
     probeSha256: sha256Hex(await readFile(probeFile)),
@@ -520,6 +531,12 @@ async function stopFixture(fixture, closeFile) {
 }
 
 main().catch((error) => {
+  if (error instanceof ProofPreflightError) {
+    console.error(`WA_P1B_PREFLIGHT_REFUSED code=${error.code}`);
+    console.error(String(error.message).slice(0, 400));
+    process.exitCode = 4;
+    return;
+  }
   console.error(`WA_P1B_HARNESS_ERROR sha256=${sha256Hex(Buffer.from(String(error?.stack ?? error)))}`);
   console.error(String(error?.message ?? error).slice(0, 400));
   process.exitCode = 3;
