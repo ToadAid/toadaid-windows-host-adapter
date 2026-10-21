@@ -16,8 +16,11 @@ import { createHash } from "node:crypto";
 import { readFile, realpath } from "node:fs/promises";
 import { join } from "node:path";
 
-export const APPROVED_CAPABILITY_COMMIT = "bd55a3d8fd45aeabe717e794263e04b4032fa242";
-export const APPROVED_CONTRACT_SHA256 = "310e30a2058f56e1310475bd20752d8883573028f836fd946fcaedb400172cda";
+// WA-CAP-SYNC-P1 (proposed, needs reviewer approval): the pin moves to current
+// toadaid-agent-capabilities main. The 2026-10-16/17 proofs stay bound to
+// bd55a3d8… / 310e30a2… and are not rewritten.
+export const APPROVED_CAPABILITY_COMMIT = "be750075e644be399d0dc92df406074d3bbff9c2";
+export const APPROVED_CONTRACT_SHA256 = "86f0d458826f81e98053e72490c7b19b2860dedabab25b974d47bc28673ff755";
 const CAPABILITY = "@toadaid/agent-capabilities";
 const GIT_TIMEOUT_MS = 10_000;
 

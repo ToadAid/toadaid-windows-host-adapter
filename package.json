@@ -22,7 +22,7 @@
     "live:observation": "node scripts/windows-live-observation-smoke.mjs"
   },
   "dependencies": {
-    "@toadaid/agent-capabilities": "github:ToadAid/toadaid-agent-capabilities#bd55a3d8fd45aeabe717e794263e04b4032fa242"
+    "@toadaid/agent-capabilities": "github:ToadAid/toadaid-agent-capabilities#be750075e644be399d0dc92df406074d3bbff9c2"
   },
   "devDependencies": {
     "@types/node": "22.20.4",
