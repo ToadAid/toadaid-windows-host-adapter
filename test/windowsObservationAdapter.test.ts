@@ -3,7 +3,6 @@ import {
   createHash,
 } from "node:crypto";
 import {
-  mkdtemp,
   readFile,
   realpath,
   writeFile,
@@ -11,9 +10,6 @@ import {
 import {
   join,
 } from "node:path";
-import {
-  tmpdir,
-} from "node:os";
 import test from "node:test";
 
 import type {
@@ -29,6 +25,7 @@ import {
 import type {
   WindowsObservationWorker,
 } from "../src/windowsObservationAdapter.js";
+import { withTempRoot } from "./support/tempRoot.js";
 
 function sha256(
   value: Uint8Array | string,
@@ -156,13 +153,7 @@ test("WA-P1 PowerShell path is explicit local absolute and derived from SystemRo
   );
 });
 
-test("WA-P1 adapter verifies artifacts and exposes only verified local resolution", async () => {
-  const root = await mkdtemp(
-    join(
-      tmpdir(),
-      "toadaid-windows-observation-",
-    ),
-  );
+test("WA-P1 adapter verifies artifacts and exposes only verified local resolution", async () => withTempRoot("toadaid-windows-observation-", async (root) => {
   const artifactPath =
     join(
       root,
@@ -248,12 +239,9 @@ test("WA-P1 adapter verifies artifacts and exposes only verified local resolutio
     sha256(onDisk),
     result.artifacts[0]!.sha256,
   );
-});
+}));
 
-test("WA-P1 refuses capability/tool substitution before worker entry", async () => {
-  const root = await mkdtemp(
-    join(tmpdir(), "toadaid-windows-observation-"),
-  );
+test("WA-P1 refuses capability/tool substitution before worker entry", async () => withTempRoot("toadaid-windows-observation-", async (root) => {
   let calls = 0;
   const worker:
     WindowsObservationWorker = {
@@ -283,12 +271,9 @@ test("WA-P1 refuses capability/tool substitution before worker entry", async () 
     /does not match adapter registration/,
   );
   assert.equal(calls, 0);
-});
+}));
 
-test("WA-P1 refuses DOM, annotation, and selectorless element waits before worker entry", async () => {
-  const root = await mkdtemp(
-    join(tmpdir(), "toadaid-windows-observation-"),
-  );
+test("WA-P1 refuses DOM, annotation, and selectorless element waits before worker entry", async () => withTempRoot("toadaid-windows-observation-", async (root) => {
   let calls = 0;
   const worker:
     WindowsObservationWorker = {
@@ -409,7 +394,7 @@ test("WA-P1 refuses DOM, annotation, and selectorless element waits before worke
   );
 
   assert.equal(calls, 0);
-});
+}));
 
 test("WA-P1 source worker remains observation-only", async () => {
   const sourcePath = new URL(

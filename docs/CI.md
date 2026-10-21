@@ -40,3 +40,17 @@ Workflow: `.github/workflows/ci.yml`. Runs on pull requests and pushes to `main`
   integrity-verified, and its `prepare` build runs during install.
 - Playwright's browser download is skipped (`PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1`);
   `playwright-chromium` still declares an install script.
+
+## Test temp-directory leak gate
+
+Both `build + tests` jobs snapshot the test-owned entries (`toadaid-*`,
+`wa-p1a2-*`) directly inside the OS temp directory before `npm test` and fail
+if new ones remain afterwards (`scripts/test-temp-leaks.mjs`). The verify step
+runs even when `npm test` failed (`if: always()`), but only when the snapshot
+step succeeded; the job still fails on the original test failure, so a clean
+leak check can never mask it. The gate only
+reports each leftover's name, file count and size; it never deletes, moves or
+reads anything. Tests own their temp roots through
+`test/support/tempRoot.ts` (`withTempRoot`), which removes exactly the root it
+created after success or failure and refuses a root that was replaced by a
+symlink/junction or no longer resolves to itself.
