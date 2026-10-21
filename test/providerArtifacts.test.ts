@@ -1,28 +1,19 @@
 import assert from "node:assert/strict";
 import {
   access,
-  mkdtemp,
 } from "node:fs/promises";
 import {
   join,
 } from "node:path";
-import {
-  tmpdir,
-} from "node:os";
 import test from "node:test";
+
+import { withTempRoot } from "./support/tempRoot.js";
 
 import {
   ProviderArtifactStore,
 } from "../src/providerArtifacts.js";
 
-test("WA-P1A.1 artifacts use unpredictable operation dirs and create-new writes", async () => {
-  const root =
-    await mkdtemp(
-      join(
-        tmpdir(),
-        "toadaid-provider-artifacts-",
-      ),
-    );
+test("WA-P1A.1 artifacts use unpredictable operation dirs and create-new writes", async () => withTempRoot("toadaid-provider-artifacts-", async (root) => {
   const store =
     new ProviderArtifactStore({
       root,
@@ -73,16 +64,9 @@ test("WA-P1A.1 artifacts use unpredictable operation dirs and create-new writes"
   await assert.rejects(
     access(operation),
   );
-});
+}));
 
-test("WA-P1A.1 artifact writes refuse unknown operations and byte overflow", async () => {
-  const root =
-    await mkdtemp(
-      join(
-        tmpdir(),
-        "toadaid-provider-artifacts-",
-      ),
-    );
+test("WA-P1A.1 artifact writes refuse unknown operations and byte overflow", async () => withTempRoot("toadaid-provider-artifacts-", async (root) => {
   const store =
     new ProviderArtifactStore({
       root,
@@ -109,4 +93,4 @@ test("WA-P1A.1 artifact writes refuse unknown operations and byte overflow", asy
       Buffer.alloc(1),
     ),
   );
-});
+}));
