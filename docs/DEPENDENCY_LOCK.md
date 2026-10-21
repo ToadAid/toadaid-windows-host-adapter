@@ -11,13 +11,13 @@ no dependency was added, removed or repinned.
   `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1` on Linux (Node 22) and native Windows
   (Node 25.9.0), followed by build and the full suite.
 
-## Every locked package (27 lock entries incl. the root; 26 packages)
+## Every locked package (27 lock entries incl. the root at review time; 25 after WA-CAP-SYNC-P1)
 
 | Package | Version | Origin | Integrity | Notes |
 |---|---|---|---|---|
-| `@toadaid/agent-capabilities` | 0.1.0-alpha.0 | `git+ssh://git@github.com/ToadAid/toadaid-agent-capabilities.git#bd55a3d8fd45aeabe717e794263e04b4032fa242` (public repo) | **not verified** (git dependency; npm skips the check) | pinned by commit; runs its own `prepare` (TypeScript build) on install; built `dist/src/desktopObservation.js` SHA-256 `310e30a2…cda`, identical to all earlier proofs |
-| `playwright-chromium` | 1.63.0 | registry.npmjs.org | sha512 | transitive (from the capability package); **has an install script** (browser download, skipped via env) |
-| `playwright-core` | 1.63.0 | registry.npmjs.org | sha512 | transitive |
+| `@toadaid/agent-capabilities` | 0.1.0-alpha.0 | `git+ssh://git@github.com/ToadAid/toadaid-agent-capabilities.git#be750075e644be399d0dc92df406074d3bbff9c2` (public repo; was `#bd55a3d8…`, see the update below) | **not verified** (git dependency; npm skips the check) | pinned by commit; runs its own `prepare` (TypeScript build) on install; built `dist/src/desktopObservation.js` SHA-256 `86f0d458…f755` (was `310e30a2…cda` at `bd55a3d8`, which all 2026-10-16/17 proofs are bound to) |
+| ~~`playwright-chromium`~~ | — | — | — | **removed** by WA-CAP-SYNC-P1: the capability package now declares it an *optional peer* |
+| ~~`playwright-core`~~ | — | — | — | **removed** with it |
 | `typescript` | 7.0.2 | registry.npmjs.org | sha512 | dev |
 | `@typescript/typescript-<os>-<cpu>` ×20 | 7.0.2 | registry.npmjs.org | sha512 | dev, optional, platform-specific native compilers (aix, darwin, freebsd, linux, netbsd, openbsd, sunos, win32 variants); only the host's one is installed |
 | `@types/node` | 22.20.4 | registry.npmjs.org | sha512 | dev |
@@ -37,3 +37,18 @@ no dependency was added, removed or repinned.
   with an integrity hash (separate decision).
 - `npm ci` still executes install-time scripts (capability `prepare`,
   Playwright's install script with the download disabled).
+
+## Update: WA-CAP-SYNC-P1 (proposed, needs review)
+
+- The capability pin moves `bd55a3d8…` → `be750075…`, the caps main that
+  Agent2 vendors. It brings the hardened desktop-observation contract
+  (provider identity, display topology epoch, exact-window geometry, wait
+  completion reason).
+- At `be750075`, `playwright-chromium` is an **optional peer** of the
+  capability package. It is no longer installed here, so the lock shrinks
+  from 27 to **25** entries, and Playwright's install script no longer runs.
+  The capability package root re-exports its browser modules, which import
+  Playwright, so this adapter imports only the narrow
+  `@toadaid/agent-capabilities/desktop-observation` surface; the tests also
+  use `/host-session`, `/policy`, `/contracts`, `/invocation` and `/budget`.
+- The only remaining install-time script is the capability `prepare` build.

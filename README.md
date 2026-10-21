@@ -29,6 +29,16 @@ WA-P1 implements **observation only**:
 
 No click, text entry, process mutation, filesystem mutation, registry mutation, command execution, or shell-string authority exists in WA-P1.
 
+### Contract evidence (WA-CAP-SYNC-P1)
+
+Every result reports a **display topology epoch**. This is a SHA-256 over display order, bounds, the primary flag, hashed device names and the worker's DPI awareness. A request that selects displays by number must be bound to that epoch, and the worker refuses a stale binding before capturing anything (`DISPLAY_TOPOLOGY_STALE`).
+
+The worker asks for per-monitor DPI awareness for its own process only. An exact-window UI snapshot reports the window's bounds as `DESKTOP_PHYSICAL` geometry only when that awareness was granted; otherwise it refuses with `GEOMETRY_COORDINATE_SPACE_UNPROVEN`.
+
+Wait-for results report `completionReason` (`MATCHED` / `TIMED_OUT`). The precise reason, such as a budget-truncated wait, stays in the `WAIT_RESULT` artifact.
+
+The adapter has no cancellation channel and reports `cancellationStatus: NOT_REQUESTED`. Scaled and multi-display DPI behaviour is not yet natively proven (U04).
+
 ### Window identity
 
 An exact Windows window is represented as:

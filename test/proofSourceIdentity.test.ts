@@ -150,8 +150,8 @@ test("WA-PROOF-PORTABILITY-P1: an untracked lockfile is never trusted; no lockfi
 
 test("WA-PROOF-PORTABILITY-P1: this checkout's installed capability matches the approved pin and built contract", async () => {
   const { resolveCapabilityIdentity, resolveSourceIdentity, APPROVED_CAPABILITY_COMMIT, APPROVED_CONTRACT_SHA256 } = await load();
-  assert.equal(APPROVED_CAPABILITY_COMMIT, "bd55a3d8fd45aeabe717e794263e04b4032fa242");
-  assert.equal(APPROVED_CONTRACT_SHA256, "310e30a2058f56e1310475bd20752d8883573028f836fd946fcaedb400172cda");
+  assert.equal(APPROVED_CAPABILITY_COMMIT, "be750075e644be399d0dc92df406074d3bbff9c2");
+  assert.equal(APPROVED_CONTRACT_SHA256, "86f0d458826f81e98053e72490c7b19b2860dedabab25b974d47bc28673ff755");
   const cap = await resolveCapabilityIdentity(process.cwd());
   assert.deepEqual(cap, { pinnedCommit: APPROVED_CAPABILITY_COMMIT, lockedCommit: APPROVED_CAPABILITY_COMMIT, installedCommit: APPROVED_CAPABILITY_COMMIT, lockfile: "COMMITTED", desktopObservationJsSha256: APPROVED_CONTRACT_SHA256 });
   const src = await resolveSourceIdentity(process.cwd(), { requireClean: false });

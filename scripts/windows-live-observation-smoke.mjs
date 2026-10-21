@@ -75,6 +75,11 @@ if (process.platform !== "win32") {
         "desktop.display-inventory",
       observationEpoch:
         epoch,
+      provider: {
+        providerDescriptorSha256: "0".repeat(64),
+        providerGenerationSha256: "0".repeat(64),
+        evidenceNamespace: "windows-live-observation-smoke",
+      },
       parametersSha256:
         "0".repeat(64),
       maxWallClockMs:
@@ -93,6 +98,7 @@ if (process.platform !== "win32") {
         ownerId:
           "operator",
         displayIds: [],
+        displayTopologyEpoch: null,
         region: null,
         windowId: null,
         annotate: false,

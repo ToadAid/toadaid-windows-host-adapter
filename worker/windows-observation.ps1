@@ -79,6 +79,61 @@ namespace ToadAid {
   }
 }
 
+function Add-DpiInterop {
+  if (-not ("ToadAid.Dpi" -as [type])) {
+    Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+namespace ToadAid {
+  public static class Dpi {
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern bool SetProcessDpiAwarenessContext(IntPtr value);
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetThreadDpiAwarenessContext();
+    [DllImport("user32.dll")]
+    public static extern int GetAwarenessFromDpiAwarenessContext(IntPtr value);
+  }
+}
+"@
+  }
+}
+
+# WA-CAP-SYNC-P1: coordinates are only "physical" when this process is
+# per-monitor DPI aware. Ask for PER_MONITOR_AWARE_V2 (-4) before any window,
+# Forms or UIA work, then report what the OS actually granted:
+# 2 = per-monitor aware; 0/1 = unaware/system aware; -1 = unknown (API absent).
+function Enable-PerMonitorDpiAwareness {
+  try {
+    Add-DpiInterop
+    [void][ToadAid.Dpi]::SetProcessDpiAwarenessContext([IntPtr]::new(-4))
+    return [int][ToadAid.Dpi]::GetAwarenessFromDpiAwarenessContext(
+      [ToadAid.Dpi]::GetThreadDpiAwarenessContext()
+    )
+  } catch {
+    return -1
+  }
+}
+
+# WA-CAP-SYNC-P1: a stable identity for the display topology. Pure (unit-tested
+# by dot-sourcing): any change in display order, bounds, primary flag, device
+# name or DPI awareness yields a different epoch. Device names enter only as
+# SHA-256.
+function Display-TopologyEpoch([object[]]$Displays, [int]$DpiAwareness) {
+  $parts = @("awareness=$DpiAwareness")
+  foreach ($d in @($Displays)) {
+    $b = $d.bounds
+    $parts += "$([int]$d.id)|$([int][bool]$d.primary)|$([int]$b.left),$([int]$b.top),$([int]$b.right),$([int]$b.bottom)|$(Sha256-Text ([string]$d.deviceName))"
+  }
+  return "topology-sha256-" + (Sha256-Text ($parts -join "`n"))
+}
+
+# WA-CAP-SYNC-P1: wait-for completion reason. Pure. A budget-truncated wait is
+# still TIMED_OUT here; the WAIT_RESULT artifact keeps the precise reason.
+function Wait-CompletionReason([bool]$Matched) {
+  if ($Matched) { return "MATCHED" }
+  return "TIMED_OUT"
+}
+
 function Display-Inventory {
   Add-Type -AssemblyName System.Windows.Forms
   $screens = [System.Windows.Forms.Screen]::AllScreens
@@ -691,10 +746,22 @@ function Ui-Snapshot(
     }
   }
 
+  $windowBounds = $null
+  if ($null -ne $windowScopeRects) {
+    $wb = $windowScopeRects[0]
+    $windowBounds = @{
+      left = [int][Math]::Round($wb.left)
+      top = [int][Math]::Round($wb.top)
+      right = [int][Math]::Round($wb.right)
+      bottom = [int][Math]::Round($wb.bottom)
+    }
+  }
+
   return @{
     artifacts = $artifacts
     files = $files
     elements = $elements
+    windowBounds = $windowBounds
   }
 }
 
@@ -864,13 +931,29 @@ $displayIds = @()
 $windowId = $parameters.windowId
 $elements = $null
 $matched = $null
+$completionReason = $null
+$geometry = $null
+
+# WA-CAP-SYNC-P1: fix DPI awareness first, then identify the topology, and
+# refuse a request bound to a different topology before capturing anything.
+$script:DpiAwareness = Enable-PerMonitorDpiAwareness
+$currentInventory = Display-Inventory
+$topologyEpoch = Display-TopologyEpoch @($currentInventory) $script:DpiAwareness
+$requestedTopology = $null
+if ($parameters.PSObject.Properties.Name -contains "displayTopologyEpoch") {
+  $requestedTopology = $parameters.displayTopologyEpoch
+}
+if ($null -ne $requestedTopology -and [string]$requestedTopology -ne $topologyEpoch) {
+  throw "DISPLAY_TOPOLOGY_STALE: the display topology changed since the request was bound"
+}
 
 switch ([string]$parameters.kind) {
   "DISPLAY_INVENTORY" {
-    $inventory = Display-Inventory
+    $inventory = $currentInventory
     $token = Artifact-Token $epoch
     $id = "display-inventory-$token-0"
     $artifact = Write-Utf8JsonArtifact $artifactRoot $id @{
+      displayTopologyEpoch = $topologyEpoch
       displays = $inventory
     } "DISPLAY_INVENTORY"
     $artifacts = @($artifact.artifact)
@@ -888,11 +971,19 @@ switch ([string]$parameters.kind) {
   }
 
   "UI_SNAPSHOT" {
+    if ($null -ne $parameters.windowId -and $script:DpiAwareness -ne 2) {
+      throw "GEOMETRY_COORDINATE_SPACE_UNPROVEN: exact-window geometry needs a per-monitor DPI aware worker (got $($script:DpiAwareness))"
+    }
     $snapshot = Ui-Snapshot $parameters $artifactRoot $epoch
     $artifacts = @($snapshot.artifacts)
     $files = @($snapshot.files)
     if ($null -ne $parameters.windowId) {
       $elements = @($snapshot.elements)
+      $geometry = @{
+        coordinateSpace = "DESKTOP_PHYSICAL"
+        bounds = $snapshot.windowBounds
+        displayTopologyEpoch = $topologyEpoch
+      }
     }
     foreach ($d in $parameters.displayIds) {
       $displayIds += [int]$d
@@ -904,6 +995,7 @@ switch ([string]$parameters.kind) {
     $artifacts = @($wait.artifacts)
     $files = @($wait.files)
     $matched = [bool]$wait.matched
+    $completionReason = Wait-CompletionReason $matched
   }
 
   default {
@@ -920,6 +1012,9 @@ $evidenceBasis = @{
   displayIds = $displayIds
   windowId = $windowId
   matched = $matched
+  displayTopologyEpoch = $topologyEpoch
+  geometry = $geometry
+  completionReason = $completionReason
 } | ConvertTo-Json -Depth 16 -Compress
 
 $result = @{
@@ -928,6 +1023,7 @@ $result = @{
   sessionId = [string]$request.sessionId
   displayIds = $displayIds
   windowId = $windowId
+  displayTopologyEpoch = $topologyEpoch
   evidenceSha256 = Sha256-Text $evidenceBasis
   artifacts = $artifacts
   artifactFiles = $files
@@ -936,8 +1032,12 @@ $result = @{
 if ($null -ne $elements) {
   $result.elements = $elements
 }
+if ($null -ne $geometry) {
+  $result.geometry = $geometry
+}
 if ($null -ne $matched) {
   $result.matched = $matched
+  $result.completionReason = $completionReason
 }
 
 [Console]::Out.Write(

@@ -118,7 +118,7 @@ async function main() {
   // Identity first: a refusal here leaves no temp directory and opens no window.
   const identity = await preflight(args);
 
-  const capabilities = await import("@toadaid/agent-capabilities");
+  const capabilities = await import("@toadaid/agent-capabilities/desktop-observation");
   const adapterModule = await import(new URL("../dist/src/index.js", import.meta.url).href);
   const { createWindowsDesktopObservationAdapter } = adapterModule;
 
@@ -179,8 +179,22 @@ async function main() {
   }
   let seq = 0;
   const base = { hostId: "wa-p1b-native-host", sessionId: "wa-p1b-native-session", ownerId: "wa-p1b-operator" };
+  // WA-CAP-SYNC-P1: requests carry a synthetic provider identity, and numeric
+  // display selection is bound to the topology the C01 inventory reported.
+  const provider = {
+    providerDescriptorSha256: sha256Hex(Buffer.from("wa-p1b-provider-descriptor")),
+    providerGenerationSha256: sha256Hex(Buffer.from(`wa-p1b-provider-generation-${nonce}`)),
+    evidenceNamespace: `wa-p1b-${nonce}`,
+  };
+  let displayTopologyEpoch = null;
+  function bindTopology(raw) {
+    const ids = raw?.scope?.displayIds;
+    if (!Array.isArray(ids) || ids.length === 0 || raw.scope.displayTopologyEpoch !== undefined || displayTopologyEpoch === null) return raw;
+    return { ...raw, scope: { ...raw.scope, displayTopologyEpoch } };
+  }
   /** Builds an adapter request from the upstream normalizer, optionally overriding normalized fields (for refusal cases). */
-  function adapterRequest(raw, override = {}) {
+  function adapterRequest(rawInput, override = {}) {
+    const raw = bindTopology(rawInput);
     const normalized = { ...capabilities.normalizeDesktopObservationRequest({ ...base, ...raw }), ...override };
     seq += 1;
     return {
@@ -193,6 +207,7 @@ async function main() {
       capabilityId: normalized.capabilityId,
       toolName: normalized.toolName,
       observationEpoch: `wa-p1b-${nonce}-epoch-${seq}`,
+      provider,
       parametersSha256: capabilities.desktopObservationParametersSha256({ ...base, ...raw }),
       maxWallClockMs: normalized.maxWallClockMs,
       parameters: normalized,
@@ -238,6 +253,7 @@ async function main() {
     // ---------------------------------------------------------------- C01 display inventory
     step = "C01";
     const inv = await observe({ kind: "DISPLAY_INVENTORY" });
+    displayTopologyEpoch = inv.displayTopologyEpoch ?? null;
     const invArtifacts = await verifyArtifacts("DISPLAY_INVENTORY", inv);
     const displays = JSON.parse((await readFile(invArtifacts[0].path, "utf8")).replace(/^﻿/, "")).displays;
     const displayList = (Array.isArray(displays) ? displays : [displays]).map((d) => ({

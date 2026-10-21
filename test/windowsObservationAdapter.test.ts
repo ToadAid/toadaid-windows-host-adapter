@@ -15,7 +15,7 @@ import test from "node:test";
 import type {
   DesktopObservationAdapterRegistration,
   DesktopObservationAdapterRequest,
-} from "@toadaid/agent-capabilities";
+} from "@toadaid/agent-capabilities/desktop-observation";
 
 import {
   buildWindowsPowerShellInvocation,
@@ -71,6 +71,11 @@ function request():
       "desktop.display-inventory",
     observationEpoch:
       "observation-epoch-001",
+    provider: {
+      providerDescriptorSha256: "5".repeat(64),
+      providerGenerationSha256: "6".repeat(64),
+      evidenceNamespace: "windows-host-001-session-001",
+    },
     parametersSha256:
       "3".repeat(64),
     maxWallClockMs: 5_000,
@@ -85,6 +90,7 @@ function request():
         "host-session-001",
       ownerId: "agent0",
       displayIds: [],
+      displayTopologyEpoch: null,
       region: null,
       windowId: null,
       annotate: false,
@@ -181,6 +187,8 @@ test("WA-P1 adapter verifies artifacts and exposes only verified local resolutio
             workerRequest.sessionId,
           displayIds: [],
           windowId: null,
+          displayTopologyEpoch:
+            "topology-test-001",
           evidenceSha256:
             "4".repeat(64),
           artifacts: [

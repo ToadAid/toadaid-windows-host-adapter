@@ -12,12 +12,12 @@ import {
   DESKTOP_OBSERVATION_TOOL_NAMES,
   desktopObservationParametersSha256,
   normalizeDesktopObservationRequest,
-} from "@toadaid/agent-capabilities";
+} from "@toadaid/agent-capabilities/desktop-observation";
 import type {
   DesktopObservationAdapterRequest,
   DesktopObservationCapabilityId,
   DesktopObservationRequest,
-} from "@toadaid/agent-capabilities";
+} from "@toadaid/agent-capabilities/desktop-observation";
 
 import {
   createPowerShellWindowsObservationWorker,
@@ -252,6 +252,11 @@ async function observe(raw: Record<string, unknown>, maxWallClockOverride?: numb
     capabilityId: parameters.capabilityId,
     toolName: parameters.toolName,
     observationEpoch: `wa-p1a2-${fixture?.nonce ?? "x"}-${seq}`,
+    provider: {
+      providerDescriptorSha256: "7".repeat(64),
+      providerGenerationSha256: "8".repeat(64),
+      evidenceNamespace: "wa-p1a2-native",
+    },
     parametersSha256: desktopObservationParametersSha256(input),
     maxWallClockMs: parameters.maxWallClockMs,
     parameters,

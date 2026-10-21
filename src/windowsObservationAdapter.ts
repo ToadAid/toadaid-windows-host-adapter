@@ -25,15 +25,17 @@ import {
 import {
   DESKTOP_OBSERVATION_CONTRACT_IDS,
   DESKTOP_OBSERVATION_TOOL_NAMES,
-} from "@toadaid/agent-capabilities";
+} from "@toadaid/agent-capabilities/desktop-observation";
 import type {
   DesktopObservationAdapterRegistration,
   DesktopObservationAdapterRequest,
   DesktopObservationAdapterResult,
   DesktopObservationArtifactReference,
   DesktopObservationElementEvidence,
+  DesktopObservationGeometryEvidence,
+  DesktopWaitCompletionReason,
   GovernedDesktopObservationAdapter,
-} from "@toadaid/agent-capabilities";
+} from "@toadaid/agent-capabilities/desktop-observation";
 
 const WORKER_PATH = fileURLToPath(
   new URL(
@@ -57,10 +59,20 @@ export interface WindowsObservationWorkerResponse {
   readonly sessionId: string;
   readonly displayIds: readonly number[];
   readonly windowId: string | null;
+  /**
+   * WA-CAP-SYNC-P1: identity of the display topology the worker observed in
+   * (display ids, bounds, primary flag, hashed device names, DPI awareness).
+   * Always reported; a request bound to a different epoch is refused.
+   */
+  readonly displayTopologyEpoch: string;
+  /** Exact-window UI snapshots only: the window's physical desktop bounds. */
+  readonly geometry?: DesktopObservationGeometryEvidence;
   readonly evidenceSha256: string;
   readonly artifacts: readonly DesktopObservationArtifactReference[];
   readonly elements?: readonly DesktopObservationElementEvidence[];
   readonly matched?: boolean;
+  /** WAIT_FOR only: MATCHED iff matched=true, otherwise TIMED_OUT. */
+  readonly completionReason?: DesktopWaitCompletionReason;
   readonly artifactFiles: readonly WindowsWorkerArtifactFile[];
 }
 
@@ -334,7 +346,100 @@ function normalizeWorkerResponse(
     );
   }
 
+  assertWorkerTopologyGeometryAndCompletion(
+    value,
+    request,
+  );
+
   return value;
+}
+
+/**
+ * WA-CAP-SYNC-P1: the worker must report the display topology it observed;
+ * a request bound to another topology fails closed. Exact-window snapshots
+ * must carry physical desktop geometry in that same topology, and wait-for
+ * results must carry a completion reason that agrees with `matched`.
+ */
+function assertWorkerTopologyGeometryAndCompletion(
+  value: WindowsObservationWorkerResponse,
+  request: DesktopObservationAdapterRequest,
+): void {
+  const epoch = boundedId(
+    value.displayTopologyEpoch,
+    "worker.displayTopologyEpoch",
+  );
+  const requested =
+    request.parameters.displayTopologyEpoch;
+  if (requested !== null && requested !== epoch) {
+    throw new Error(
+      "DISPLAY_TOPOLOGY_STALE: Windows worker observed a different display topology than the request is bound to",
+    );
+  }
+
+  const exactWindow =
+    request.parameters.kind === "UI_SNAPSHOT" &&
+    request.parameters.windowId !== null;
+  if (value.geometry === undefined) {
+    if (exactWindow) {
+      throw new Error(
+        "GEOMETRY_REQUIRED: exact-window UI snapshot must report window geometry",
+      );
+    }
+  } else {
+    if (!exactWindow) {
+      throw new Error(
+        "Windows worker reported geometry outside exact-window scope",
+      );
+    }
+    const g = value.geometry;
+    if (g.coordinateSpace !== "DESKTOP_PHYSICAL") {
+      throw new Error(
+        "Windows worker geometry must be DESKTOP_PHYSICAL",
+      );
+    }
+    if (g.displayTopologyEpoch !== epoch) {
+      throw new Error(
+        "Windows worker geometry topology does not match the observed topology",
+      );
+    }
+    const b = g.bounds as unknown as Record<string, unknown>;
+    const edges = ["left", "top", "right", "bottom"] as const;
+    if (
+      b === null ||
+      typeof b !== "object" ||
+      edges.some(
+        (edge) => !Number.isSafeInteger(b[edge]),
+      ) ||
+      (b["right"] as number) <= (b["left"] as number) ||
+      (b["bottom"] as number) <= (b["top"] as number)
+    ) {
+      throw new TypeError(
+        "Windows worker geometry bounds are invalid",
+      );
+    }
+  }
+
+  if (request.parameters.kind === "WAIT_FOR") {
+    if (typeof value.matched !== "boolean") {
+      throw new TypeError(
+        "Windows worker wait-for result must report matched",
+      );
+    }
+    const expected: DesktopWaitCompletionReason =
+      value.matched ? "MATCHED" : "TIMED_OUT";
+    if (value.completionReason !== expected) {
+      throw new Error(
+        "Windows worker wait-for completionReason does not match matched",
+      );
+    }
+  } else if (
+    value.matched !== undefined ||
+    value.completionReason !== undefined
+  ) {
+    throw new Error(
+      "Windows worker reported wait-for fields outside WAIT_FOR",
+    );
+  }
 }
 
 function windowsAbsoluteLocalPath(
@@ -743,6 +848,23 @@ export function createWindowsDesktopObservationAdapter(
           ),
         windowId:
           workerResult.windowId,
+        displayTopologyEpoch:
+          workerResult.displayTopologyEpoch,
+        ...(workerResult.geometry === undefined
+          ? {}
+          : {
+              geometry: Object.freeze({
+                coordinateSpace:
+                  workerResult.geometry.coordinateSpace,
+                bounds: Object.freeze({
+                  ...workerResult.geometry.bounds,
+                }),
+                displayTopologyEpoch:
+                  workerResult.geometry.displayTopologyEpoch,
+              }),
+            }),
+        // This adapter has no cancellation channel yet; it never claims one.
+        cancellationStatus: "NOT_REQUESTED" as const,
         evidenceSha256:
           workerResult.evidenceSha256,
         artifacts:
@@ -762,6 +884,8 @@ export function createWindowsDesktopObservationAdapter(
           : {
               matched:
                 workerResult.matched,
+              completionReason:
+                workerResult.completionReason!,
             }),
       });
     },

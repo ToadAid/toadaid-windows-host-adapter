@@ -8,7 +8,7 @@ import test from "node:test";
 import type {
   DesktopObservationAdapterRegistration,
   DesktopObservationAdapterRequest,
-} from "@toadaid/agent-capabilities";
+} from "@toadaid/agent-capabilities/desktop-observation";
 
 import {
   createWindowsDesktopObservationAdapter,
@@ -46,6 +46,11 @@ function waitRequest(maxWallClockMs: number): DesktopObservationAdapterRequest {
     capabilityId: "host:wait-for",
     toolName: "desktop.wait-for",
     observationEpoch: "observation-epoch-001",
+    provider: {
+      providerDescriptorSha256: "5".repeat(64),
+      providerGenerationSha256: "6".repeat(64),
+      evidenceNamespace: "windows-host-001-session-001",
+    },
     parametersSha256: "3".repeat(64),
     maxWallClockMs,
     parameters: {
@@ -56,6 +61,7 @@ function waitRequest(maxWallClockMs: number): DesktopObservationAdapterRequest {
       sessionId: "host-session-001",
       ownerId: "agent0",
       displayIds: [],
+      displayTopologyEpoch: null,
       region: null,
       windowId: "hwnd-1",
       annotate: false,
@@ -88,9 +94,11 @@ test("WA-P1A.2 F3: the worker receives an inner deadline before the adapter's ou
           sessionId: request.sessionId,
           displayIds: [],
           windowId: request.parameters.windowId,
+          displayTopologyEpoch: "topology-test-001",
           evidenceSha256: "4".repeat(64),
           artifacts: [{ id: "wait-result-f3-0", kind: "WAIT_RESULT", sha256: createHash("sha256").update(bytes).digest("hex") }],
           matched: false,
+          completionReason: "TIMED_OUT",
           artifactFiles: [{ id: "wait-result-f3-0", path }],
         };
       },
