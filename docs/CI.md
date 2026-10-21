@@ -35,11 +35,12 @@ Workflow: `.github/workflows/ci.yml`. Runs on pull requests and pushes to `main`
   otherwise silently skip `typescript` and `@types/node`.
 - Registry packages are verified by their `integrity` (sha512) hashes. The
   git-sourced `@toadaid/agent-capabilities` is pinned by **commit**
-  (`bd55a3d8fd45aeabe717e794263e04b4032fa242`); npm prints
+  (`be750075e644be399d0dc92df406074d3bbff9c2`); npm prints
   `skipping integrity check for git dependency`, so it is **not**
   integrity-verified, and its `prepare` build runs during install.
-- Playwright's browser download is skipped (`PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1`);
-  `playwright-chromium` still declares an install script.
+- Playwright is no longer installed: at this pin it is an optional peer of
+  the capability package (WA-CAP-SYNC-P1). `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1`
+  stays set as a harmless guard.
 
 ## Test temp-directory leak gate
 
